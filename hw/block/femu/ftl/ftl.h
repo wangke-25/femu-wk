@@ -4,6 +4,8 @@
 #include "qemu/osdep.h"
 #include "qemu/thread.h"
 
+#include "chunkbuffer.h"
+
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
@@ -196,6 +198,9 @@ struct ssd {
     struct rte_ring **to_poller;
     bool *dataplane_started_ptr;
     QemuThread ftl_thread;
+
+    /**wk**/
+    struct chunk_buffer_info *cb_info;
 };
 
 

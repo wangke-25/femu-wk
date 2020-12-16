@@ -243,7 +243,8 @@ static void ssd_init_params(struct ssdparams *spp)
     spp->secsz = 512;
     spp->secs_per_pg = 8;
     spp->pgs_per_blk = 256;
-    spp->blks_per_pl = 256; /* 16GB */
+    //spp->blks_per_pl = 256; /* 16GB */
+    spp->blks_per_pl = 640; /* 40GB */
     spp->pls_per_lun = 1;
     spp->luns_per_ch = 8;
     spp->nchs = 8;
@@ -402,6 +403,9 @@ void ssd_init(FemuCtrl *n)
 
     /* initialize write pointer, this is how we allocate new pages for writes */
     ssd_init_write_pointer(ssd);
+
+    /**initialize chunkbuffer**/
+    init_chunkbuffer(ssd);
 
     qemu_thread_create(&ssd->ftl_thread, "ftl_thread", ftl_thread, n, QEMU_THREAD_JOINABLE);
 }
@@ -780,9 +784,9 @@ static int do_gc(struct ssd *ssd, bool force)
     }
 
     ppa.g.blk = victim_line->id;
-    printf("Coperd,%s,FTL,GCing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n",
+    /*printf("Coperd,%s,FTL,GCing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n",
             ssd->ssdname, ppa.g.blk, victim_line->ipc, ssd->lm.victim_line_cnt,
-            ssd->lm.full_line_cnt, ssd->lm.free_line_cnt);
+            ssd->lm.full_line_cnt, ssd->lm.free_line_cnt);*/
     /* copy back valid data */
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
@@ -867,6 +871,403 @@ static void *ftl_thread(void *arg)
     }
 }
 
+/**wk**/
+int init_chunkbuffer(struct ssd* ssd)
+{
+	struct chunk_buffer_info* cb_info = (struct chunk_buffer_info*)malloc(sizeof(struct chunk_buffer_info));
+	assert(cb_info);
+
+	cb_info->cur_size = 0;
+	cb_info->max_size = MAX_CHUNK_BUFFER_SIZE;
+	cb_info->head = NULL;
+	cb_info->tail = NULL;
+
+    cb_info->rbuffer_hit = 0;
+    cb_info->wbuffer_hit = 0;
+    cb_info->rbuffer_miss = 0;
+    cb_info->wbuffer_miss = 0;
+
+    cb_info->hashmap = (struct chunk_node **)malloc(sizeof(struct chunk_node *) * HASH_MAP_SIZE);
+    assert(cb_info->hashmap);
+
+    for(int i; i < HASH_MAP_SIZE; i++)
+        cb_info->hashmap[i] = NULL;
+
+	ssd->cb_info = cb_info;
+
+	return 0;
+}
+
+/**wk**/
+struct chunk_node *lookup_hashmap(struct chunk_buffer_info *cb_info, uint64_t lcn)
+{
+    //printf("1.0!\n");
+    uint64_t hashkey = lcn;
+    uint64_t index = hashkey % HASH_MAP_SIZE;
+
+    struct chunk_node *tmp;
+    tmp = cb_info->hashmap[index];
+
+    while(tmp != NULL)
+    {
+        if(tmp->lcn == lcn)
+        {
+            //printf("1.1!\n");
+            return tmp;
+        }
+        tmp = tmp->hashnext;
+    }
+
+    //printf("1.2!\n");
+    return tmp;
+}
+
+/**wk**/
+void add_2_hashmap(struct chunk_buffer_info *cb_info, struct chunk_node *new_node)
+{
+    //printf("2.0!\n");
+    uint64_t hashkey = new_node->lcn;
+    uint64_t index = hashkey % HASH_MAP_SIZE;
+
+    struct chunk_node *tmp;
+    tmp = cb_info->hashmap[index];
+
+    if(tmp == NULL) {
+        cb_info->hashmap[index] = new_node;
+    }
+    else {
+        while(tmp->hashnext != NULL) {
+            tmp = tmp->hashnext;
+        }
+
+        tmp->hashnext = new_node;
+        new_node->hashpre = tmp;
+    }
+}
+
+void test_hashmap(struct chunk_buffer_info *cb_info, uint64_t index, struct chunk_node *victim, int start_end)
+{
+    struct chunk_node *tmp = cb_info->hashmap[index];
+    if(tmp != NULL && tmp->hashnext != NULL) {
+        if(start_end == 0)
+            printf("before del: ");
+        else if(start_end == 1)
+            printf("after del: ");
+        while(tmp != NULL) {
+            if(tmp->hashnext != NULL)
+                printf("%d-> ", tmp->lcn);
+            else
+                printf("%d", tmp->lcn);
+            tmp = tmp->hashnext;
+        }
+        printf("\n");
+        if(start_end == 0)
+            printf("del: %d\n", victim->lcn);
+    }
+}
+
+/**wk**/
+void del_from_hashmap(struct chunk_buffer_info *cb_info, struct chunk_node *victim)
+{
+    //printf("3.0!\n");
+    uint64_t hashkey = victim->lcn;
+    uint64_t index = hashkey % HASH_MAP_SIZE;
+
+    //test_hashmap(cb_info, index, victim, 0);
+    
+    if(cb_info->hashmap[index] == victim) {
+        if(victim->hashpre == NULL) {
+            cb_info->hashmap[index] = victim->hashnext;
+
+            if(victim->hashnext != NULL) {
+                victim->hashnext->hashpre = NULL;
+            }
+        }
+        else
+            printf("del_from_hashmap error!\n");
+    }
+    else {
+        //test_hashmap(cb_info, index, victim, 0);
+        victim->hashpre->hashnext = victim->hashnext;
+        if(victim->hashnext != NULL){
+            victim->hashnext->hashpre = victim->hashpre;
+        }
+        //test_hashmap(cb_info, index, victim, 1);
+    }
+    
+    victim->hashnext = NULL;
+    victim->hashpre = NULL;
+    //test_hashmap(cb_info, index, victim, 1);
+    //printf("3.1!\n");
+}
+
+/**wk**/
+int lru_lookup(struct ssd *ssd, uint64_t lpn)
+{
+    struct chunk_buffer_info *cb_info = ssd->cb_info;
+    struct chunk_node *tmp;
+    uint64_t lcn = lpn / PAGES_PER_CHUNK;
+    uint64_t offset = lpn % PAGES_PER_CHUNK;
+
+    tmp = lookup_hashmap(cb_info, lcn);
+#if 0
+    struct chunk_node *cur = cb_info->head;
+    while(cur != NULL)
+    {
+        if(cur->lcn == lcn)
+            break;
+        cur = cur->next;
+    }
+    /*if(cur != tmp) {
+        if(tmp != NULL && cur != NULL)
+            printf("lcn: %d, hash：%d, cur: %d\n", lcn, tmp->lcn, cur->lcn);
+        printf("error in hashmap!\n");
+    }*/
+    tmp = cur;
+#endif
+    if(tmp != NULL) {
+        if(tmp == cb_info->head);
+        else if(tmp == cb_info->tail) {
+            tmp->pre->next = NULL;
+            cb_info->tail = tmp->pre;
+            tmp->pre = NULL;
+            tmp->next = cb_info->head;
+            cb_info->head->pre = tmp;
+            cb_info->head = tmp;
+        }
+        else {
+            tmp->pre->next = tmp->next;
+            tmp->next->pre = tmp->pre;
+            tmp->pre = NULL;
+            tmp->next = cb_info->head;
+            cb_info->head->pre = tmp;
+            cb_info->head = tmp;
+        }
+
+        if(tmp->bitmap[offset] == 1)
+            return 1;
+        else
+            return 0;
+    }
+
+    return -1;
+}
+
+/**wk**/
+int lru_evict(struct chunk_buffer_info *cb_info, struct chunk_node *victim)
+{
+    if(victim == cb_info->head)
+    {
+        cb_info->head = NULL;
+        cb_info->tail = NULL;
+    }
+    else
+    {
+        cb_info->tail = victim->pre;
+        cb_info->tail->next = NULL;
+    }
+
+    del_from_hashmap(cb_info, victim);
+    
+    //printf("lru_evict()!\n");
+    return 0;
+}
+
+/**wk**/
+int lru_add_new_node(struct chunk_buffer_info *cb_info, uint64_t lpn, int res)
+{
+    uint64_t lcn = lpn / PAGES_PER_CHUNK;
+    uint64_t offset = lpn % PAGES_PER_CHUNK;
+
+    if(res == 0)
+    {
+        struct chunk_node *tmp = cb_info->head;
+        tmp->bitmap[offset] = 1;
+        tmp->size++;
+    }
+    else if(res == -1)
+    {
+        struct chunk_node *new_node = (struct chunk_node *)malloc(sizeof(struct chunk_node));
+
+        assert(new_node);
+
+        memset(new_node->bitmap, 0, sizeof(char) * PAGES_PER_CHUNK);
+        new_node->size = 0;
+        new_node->lcn = 0;
+        new_node->pre = NULL;
+        new_node->next = NULL;
+        new_node->hashpre = NULL;
+        new_node->hashnext = NULL;
+
+        new_node->bitmap[offset] = 1;
+        new_node->lcn = lcn;
+        new_node->size++;
+
+        if(cb_info->head == NULL)
+        {
+            cb_info->head = new_node;
+            cb_info->tail = new_node;
+        }
+        else
+        {
+            cb_info->head->pre = new_node;
+            new_node->next = cb_info->head;
+            cb_info->head = new_node;
+        }
+
+        add_2_hashmap(cb_info, new_node);
+    }
+    else
+        printf("error in lru_add_new_node()!\n");
+
+    cb_info->cur_size++;
+    return 0;
+}
+
+/**wk**/
+uint64_t write_back_page(struct ssd *ssd, uint64_t lpn, int64_t stime)
+{
+    struct ppa ppa;
+    uint64_t sublat = 0;
+
+    ppa = get_maptbl_ent(ssd, lpn);
+    if (mapped_ppa(&ppa)) {
+        /* overwrite */
+        /* update old page information first */
+        //printf("Coperd,before-overwrite,line[%d],ipc=%d,vpc=%d\n", ppa.g.blk, get_line(ssd, &ppa)->ipc, get_line(ssd, &ppa)->vpc);
+        mark_page_invalid(ssd, &ppa);
+        //printf("Coperd,after-overwrite,line[%d],ipc=%d,vpc=%d\n", ppa.g.blk, get_line(ssd, &ppa)->ipc, get_line(ssd, &ppa)->vpc);
+        set_rmap_ent(ssd, INVALID_LPN, &ppa);
+    }
+
+    /* new write */
+    /* find a new page */
+    ppa = get_new_page(ssd);
+    /* update maptbl */
+    set_maptbl_ent(ssd, lpn, &ppa);
+    /* update rmap */
+    set_rmap_ent(ssd, lpn, &ppa);
+
+    mark_page_valid(ssd, &ppa);
+
+    /* need to advance the write pointer here */
+    ssd_advance_write_pointer(ssd);
+
+    struct nand_cmd swr;
+    swr.type = USER_IO;
+    swr.cmd = NAND_WRITE;
+    swr.stime = stime;
+    /* get latency statistics */
+    sublat = ssd_advance_status(ssd, &ppa, &swr);
+
+    //printf("write_back_page()!\n");
+    return sublat;
+}
+
+/**wk**/
+uint64_t write_back_chunk(struct ssd *ssd, struct chunk_node *victim, int64_t stime)
+{
+#if 1
+    int i;
+    uint64_t curlat = 0, maxlat = 0;
+    uint64_t start_lpn = victim->lcn * PAGES_PER_CHUNK;
+
+    for(i = 0; i < PAGES_PER_CHUNK; i++)
+    {
+        if(victim->bitmap[i] != 1)
+            continue;
+        
+        uint64_t lpn = start_lpn + i;
+        curlat = write_back_page(ssd, lpn, stime);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
+    }
+
+    return maxlat;
+#else
+    printf("lcn: %d, size: %d, bitmap: ", victim->lcn, victim->size);
+    for(int i = 0; i < PAGES_PER_CHUNK; i++)
+    {
+        printf("%d, ", victim->bitmap[i]);
+    }
+    printf("\n");
+    return 0;
+#endif
+}
+
+/**wk**/
+uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
+{
+    uint64_t sublat = 0;
+    struct ppa ppa;
+
+    if(lru_lookup(ssd, lpn) == 1) {
+        ssd->cb_info->rbuffer_hit++;
+        sublat = BUFFER_HIT_LAT;
+    }
+    else {
+        ssd->cb_info->rbuffer_miss++;
+        ppa = get_maptbl_ent(ssd, lpn);
+        if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
+            //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
+            //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
+            //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
+            //continue;
+            return 0;
+        }
+        struct nand_cmd srd;
+        srd.type = USER_IO;
+        srd.cmd = NAND_READ;
+        srd.stime = stime;
+        sublat = ssd_advance_status(ssd, &ppa, &srd);
+    }
+    
+    return sublat;
+}
+
+/**wk**/
+uint64_t ssd_buffer_write(struct ssd *ssd, uint64_t lpn, int64_t stime)
+{
+    uint64_t sublat = 0;
+    int add_size = NODE_ADD_SIZE;
+    struct chunk_buffer_info *cb_info = ssd->cb_info;
+    struct chunk_node *victim = NULL;
+    int res;
+
+    res = lru_lookup(ssd, lpn);
+    if(res == 1) {
+        ssd->cb_info->wbuffer_hit++;
+        sublat = BUFFER_HIT_LAT;
+    }
+    else {
+        ssd->cb_info->wbuffer_miss++;
+        sublat = BUFFER_HIT_LAT;
+        while(cb_info->cur_size + add_size > cb_info->max_size) {
+            victim = cb_info->tail;
+
+            if(victim) {
+                sublat = write_back_chunk(ssd, victim, stime);
+                lru_evict(cb_info, victim);
+                cb_info->cur_size -= victim->size;
+                
+                free(victim);
+                victim = NULL;
+            }
+        }
+
+        lru_add_new_node(cb_info, lpn, res);
+
+        //printf("buffer size: %d\n", cb_info->cur_size);
+        //if(cb_info->head != NULL)
+            //printf("head: %d, tail: %d\n", cb_info->head->lcn, cb_info->tail->lcn);
+
+        if(cb_info->cur_size > cb_info->max_size)
+            printf("error in handle_write_req()! cur_size: %d, max_size: %d\n", cb_info->cur_size, cb_info->max_size);
+        
+    }
+
+    return sublat;
+}
+
 /* accept NVMe cmd as input, in order to support more command types in future */
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
@@ -941,6 +1342,9 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     } else {
         /* normal IO read path */
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+#if 1
+            sublat = ssd_buffer_read(ssd, lpn, req->stime);
+#else
             ppa = get_maptbl_ent(ssd, lpn);
             if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
                 //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
@@ -953,9 +1357,9 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
             srd.cmd = NAND_READ;
             srd.stime = req->stime;
             sublat = ssd_advance_status(ssd, &ppa, &srd);
+#endif
             maxlat = (sublat > maxlat) ? sublat : maxlat;
         }
-
         /* this is the latency taken by this read request */
         //req->expire_time = maxlat;
         //printf("Coperd,%s,rd,lba:%lu,lat:%lu\n", ssd->ssdname, req->slba, maxlat);
@@ -995,6 +1399,10 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     // are we doing fresh writes ? maptbl[lpn] == FREE, pick a new page
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+#if 1        
+        curlat = ssd_buffer_write(ssd, lpn, req->stime);
+        //ssd_buffer_write(ssd, lpn, req->stime);
+#else      
         ppa = get_maptbl_ent(ssd, lpn);
         if (mapped_ppa(&ppa)) {
             /* overwrite */
@@ -1024,6 +1432,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         swr.stime = req->stime;
         /* get latency statistics */
         curlat = ssd_advance_status(ssd, &ppa, &swr);
+#endif
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
