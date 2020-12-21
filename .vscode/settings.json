@@ -1,3 +1,33 @@
 {
-    "cmake.configureOnOpen": false
+    "cmake.configureOnOpen": false,
+    "files.associations": {
+        "array": "cpp",
+        "string_view": "cpp",
+        "functional": "cpp",
+        "tuple": "cpp",
+        "type_traits": "cpp",
+        "utility": "cpp",
+        "istream": "cpp",
+        "ostream": "cpp",
+        "*.list": "c",
+        "*.def": "c",
+        "atomic": "c",
+        "*.tcc": "c",
+        "cmath": "c",
+        "unordered_map": "c",
+        "exception": "c",
+        "algorithm": "c",
+        "optional": "c",
+        "memory": "c",
+        "random": "c",
+        "fstream": "c",
+        "iosfwd": "c",
+        "limits": "c",
+        "new": "c",
+        "sstream": "c",
+        "streambuf": "c",
+        "system_error": "c",
+        "typeinfo": "c",
+        "memory_resource": "c"
+    }
 }

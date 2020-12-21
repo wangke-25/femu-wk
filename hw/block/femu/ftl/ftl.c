@@ -18,6 +18,18 @@ static inline bool should_gc_high(struct ssd *ssd)
     return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines_high);
 }
 
+static inline struct ppa get_gtd_ent()
+{
+    struct ppa ppa1;
+    ppa1.ppa = 1;
+    return ppa1;
+}
+
+static inline void set_gtd_ent()
+{
+    return;
+}
+
 static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
 {
     return ssd->maptbl[lpn];
@@ -40,6 +52,16 @@ static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
     assert(pgidx < spp->tt_pgs);
 
     return pgidx;
+}
+
+static inline uint64_t get_rgtd_ent()
+{
+    return 0;
+}
+
+static inline void set_rgtd_ent()
+{
+    return;
 }
 
 static inline uint64_t get_rmap_ent(struct ssd *ssd, struct ppa *ppa)
@@ -106,6 +128,8 @@ static void ssd_init_lines(struct ssd *ssd)
         line->id = i;
         line->ipc = 0;
         line->vpc = 0;
+
+        line->type = -1;              //init line free
         /* initialize all the lines as free lines */
         QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
         lm->free_line_cnt++;
@@ -116,15 +140,24 @@ static void ssd_init_lines(struct ssd *ssd)
     lm->full_line_cnt = 0;
 }
 
-static void ssd_init_write_pointer(struct ssd *ssd)
+static void ssd_init_write_pointer(struct ssd *ssd, int type)
 {
-    struct write_pointer *wpp = &ssd->wp;
+    //struct write_pointer *wpp = &ssd->wp;
+    struct write_pointer *wpp;
     struct line_mgmt *lm = &ssd->lm;
     struct line *curline = NULL;
+    if(type == DATA_PAGE)
+        wpp = &ssd->wp;
+    else if(type == TRANS_PAGE)
+        wpp = &ssd->trans_wp;
+    
     /* make sure lines are already initialized by now */
     curline = QTAILQ_FIRST(&lm->free_line_list);
     QTAILQ_REMOVE(&lm->free_line_list, curline, entry);
     lm->free_line_cnt--;
+
+    curline->type = type;
+
     /* wpp->curline is always our onging line for writes */
     wpp->curline = curline;
     wpp->ch = 0;
@@ -139,7 +172,7 @@ static inline void check_addr(int a, int max)
     assert(a >= 0 && a < max);
 }
 
-static struct line *get_next_free_line(struct ssd *ssd)
+static struct line *get_next_free_line(struct ssd *ssd, int type)
 {
     struct line_mgmt *lm = &ssd->lm;
     struct line *curline = NULL;
@@ -152,14 +185,21 @@ static struct line *get_next_free_line(struct ssd *ssd)
 
     QTAILQ_REMOVE(&lm->free_line_list, curline, entry);
     lm->free_line_cnt--;
+
+    curline->type = type;
     return curline;
 }
 
-static void ssd_advance_write_pointer(struct ssd *ssd)
+static void ssd_advance_write_pointer(struct ssd *ssd, int type)
 {
     struct ssdparams *spp = &ssd->sp;
-    struct write_pointer *wpp = &ssd->wp;
+    //struct write_pointer *wpp = &ssd->wp;
+    struct write_pointer *wpp;
     struct line_mgmt *lm = &ssd->lm;
+    if(type == DATA_PAGE)
+        wpp = &ssd->wp;
+    else if(type == TRANS_PAGE)
+        wpp = &ssd->trans_wp;
 
     check_addr(wpp->ch, spp->nchs);
     wpp->ch++;
@@ -194,7 +234,7 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
                 check_addr(wpp->blk, spp->blks_per_pl);
                 /* TODO: how should we choose the next block for writes */
                 wpp->curline = NULL;
-                wpp->curline = get_next_free_line(ssd);
+                wpp->curline = get_next_free_line(ssd, type);
                 if (!wpp->curline) {
                     abort();
                 }
@@ -212,10 +252,16 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
     //printf("Next,ch:%d,lun:%d,blk:%d,pg:%d\n", wpp->ch, wpp->lun, wpp->blk, wpp->pg);
 }
 
-static struct ppa get_new_page(struct ssd *ssd)
+static struct ppa get_new_page(struct ssd *ssd, int type)
 {
-    struct write_pointer *wpp = &ssd->wp;
+    //struct write_pointer *wpp = &ssd->wp;
+    struct write_pointer *wpp;
     struct ppa ppa;
+    if(type == DATA_PAGE)
+        wpp = &ssd->wp;
+    else if(type == TRANS_PAGE)
+        wpp = &ssd->trans_wp;
+
     ppa.ppa = 0;
     ppa.g.ch = wpp->ch;
     ppa.g.lun = wpp->lun;
@@ -402,7 +448,12 @@ void ssd_init(FemuCtrl *n)
     ssd_init_lines(ssd);
 
     /* initialize write pointer, this is how we allocate new pages for writes */
-    ssd_init_write_pointer(ssd);
+    ssd_init_write_pointer(ssd, DATA_PAGE);
+
+#if TRANS
+    /* init trans write pointer */
+    ssd_init_write_pointer(ssd, TRANS_PAGE);
+#endif
 
     /**initialize chunkbuffer**/
     init_chunkbuffer(ssd);
@@ -647,6 +698,37 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
     }
 }
 
+static uint64_t gc_write_trans_page(struct ssd *ssd, struct ppa *old_ppa)
+{
+    printf("gc_write_trans_page????\n");
+    struct ppa new_ppa;
+    struct nand_lun *new_lun;
+    uint64_t t_vpn = get_rgtd_ent(ssd, old_ppa);
+
+    new_ppa = get_new_page(ssd, TRANS_PAGE);
+    /* update gtd */
+    set_gtd_ent(ssd, t_vpn, &new_ppa);
+    /* update rgtd */
+    set_rgtd_ent(ssd, t_vpn, &new_ppa);
+    
+    mark_page_valid(ssd, &new_ppa);
+
+    ssd_advance_write_pointer(ssd, TRANS_PAGE);
+    
+    if (ssd->sp.enable_gc_delay) {
+        struct nand_cmd gcw;
+        gcw.type = GC_IO;
+        gcw.cmd = NAND_WRITE;
+        gcw.stime = 0;
+        ssd_advance_status(ssd, &new_ppa, &gcw);
+    }
+
+    new_lun = get_lun(ssd, &new_ppa);
+    new_lun->gc_endtime = new_lun->next_lun_avail_time;
+
+    return 0;
+}
+
 /* move valid page data (already in DRAM) from victim line to a new page */
 static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 {
@@ -658,7 +740,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     //set_rmap(ssd, lpn, new_ppa);
 
     assert(valid_lpn(ssd, lpn));
-    new_ppa = get_new_page(ssd);
+    new_ppa = get_new_page(ssd, DATA_PAGE);
     /* update maptbl */
     set_maptbl_ent(ssd, lpn, &new_ppa);
     /* update rmap */
@@ -668,7 +750,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     mark_page_valid(ssd, &new_ppa);
 
     /* need to advance the write pointer here */
-    ssd_advance_write_pointer(ssd);
+    ssd_advance_write_pointer(ssd, DATA_PAGE);
 
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
@@ -730,7 +812,7 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
 }
 
 /* here ppa identifies the block we want to clean */
-static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
+static void clean_one_block(struct ssd *ssd, struct ppa *ppa, int type)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_block *blk = get_blk(ssd, ppa);
@@ -746,7 +828,10 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
             /* delay the maptbl update until "write" happens */
-            gc_write_page(ssd, ppa);
+            if(type == DATA_PAGE)
+                gc_write_page(ssd, ppa);
+            else if(type == TRANS_PAGE)
+                gc_write_trans_page(ssd, ppa);
             cnt++;
         }
     }
@@ -761,6 +846,7 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     struct line *line = get_line(ssd, ppa);
     line->ipc = 0;
     line->vpc = 0;
+    line->type = -1;                //mark line free
     /* move this line to free line list */
     QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
     lm->free_line_cnt++;
@@ -775,6 +861,7 @@ static int do_gc(struct ssd *ssd, bool force)
     struct nand_lun *lunp;
     struct ppa ppa;
     int ch, lun;
+    int type;
 
     victim_line = select_victim_line(ssd, force);
     if (!victim_line) {
@@ -783,6 +870,7 @@ static int do_gc(struct ssd *ssd, bool force)
         return -1;
     }
 
+    type = victim_line->type;                       //get line's type
     ppa.g.blk = victim_line->id;
     /*printf("Coperd,%s,FTL,GCing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n",
             ssd->ssdname, ppa.g.blk, victim_line->ipc, ssd->lm.victim_line_cnt,
@@ -795,7 +883,7 @@ static int do_gc(struct ssd *ssd, bool force)
             ppa.g.pl = 0;
             //chp = get_ch(ssd, &ppa);
             lunp = get_lun(ssd, &ppa);
-            clean_one_block(ssd, &ppa);
+            clean_one_block(ssd, &ppa, type);
             mark_block_free(ssd, &ppa);
 
             if (spp->enable_gc_delay) {
@@ -1124,6 +1212,11 @@ int lru_add_new_node(struct chunk_buffer_info *cb_info, uint64_t lpn, int res)
     return 0;
 }
 
+uint64_t write_back_trans_page()
+{
+    return 0;
+}
+
 /**wk**/
 uint64_t write_back_page(struct ssd *ssd, uint64_t lpn, int64_t stime)
 {
@@ -1142,7 +1235,7 @@ uint64_t write_back_page(struct ssd *ssd, uint64_t lpn, int64_t stime)
 
     /* new write */
     /* find a new page */
-    ppa = get_new_page(ssd);
+    ppa = get_new_page(ssd, DATA_PAGE);
     /* update maptbl */
     set_maptbl_ent(ssd, lpn, &ppa);
     /* update rmap */
@@ -1151,7 +1244,7 @@ uint64_t write_back_page(struct ssd *ssd, uint64_t lpn, int64_t stime)
     mark_page_valid(ssd, &ppa);
 
     /* need to advance the write pointer here */
-    ssd_advance_write_pointer(ssd);
+    ssd_advance_write_pointer(ssd, DATA_PAGE);
 
     struct nand_cmd swr;
     swr.type = USER_IO;
