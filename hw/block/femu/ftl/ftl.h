@@ -5,10 +5,17 @@
 #include "qemu/thread.h"
 
 #include "chunkbuffer.h"
+#include "dftl.h"
 
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
+
+#define DATA_PAGE 0
+#define TRANS_PAGE 1
+
+#define TRANS 1         //mapping base
+#define DFTL 123    //dftl
 
 enum {
     NAND_READ =  0,
@@ -23,6 +30,7 @@ enum {
 enum {
     USER_IO = 0,
     GC_IO = 1,
+    TRANS_IO = 2,
 };
 
 enum {
@@ -153,6 +161,8 @@ typedef struct line {
     QTAILQ_ENTRY(line) entry; /* in either {free,victim,full} list */
     /* position in the priority queue for victim lines */
     size_t                  pos;
+    
+    int type;       /* free:-1, data:0, trans:1 */
 } line;
 
 /* wp: record next write addr */
@@ -201,6 +211,10 @@ struct ssd {
 
     /**wk**/
     struct chunk_buffer_info *cb_info;
+    struct write_pointer trans_wp;
+
+    struct mapping_cache_info *mc_info;
+    struct ppa *gtd;
 };
 
 

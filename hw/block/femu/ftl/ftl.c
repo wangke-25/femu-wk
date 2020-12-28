@@ -18,6 +18,16 @@ static inline bool should_gc_high(struct ssd *ssd)
     return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines_high);
 }
 
+static inline struct ppa get_gtd_ent(struct ssd *ssd, uint64_t tvpn)
+{
+    return ssd->gtd[tvpn];
+}
+
+static inline void set_gtd_ent(struct ssd *ssd, uint64_t tvpn, struct ppa *ppa)
+{
+    ssd->gtd[tvpn] = *ppa;
+}
+
 static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
 {
     return ssd->maptbl[lpn];
@@ -106,6 +116,8 @@ static void ssd_init_lines(struct ssd *ssd)
         line->id = i;
         line->ipc = 0;
         line->vpc = 0;
+
+        line->type = -1;              //init line free
         /* initialize all the lines as free lines */
         QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
         lm->free_line_cnt++;
@@ -116,21 +128,30 @@ static void ssd_init_lines(struct ssd *ssd)
     lm->full_line_cnt = 0;
 }
 
-static void ssd_init_write_pointer(struct ssd *ssd)
+static void ssd_init_write_pointer(struct ssd *ssd, int type)
 {
-    struct write_pointer *wpp = &ssd->wp;
+    //struct write_pointer *wpp = &ssd->wp;
+    struct write_pointer *wpp;
     struct line_mgmt *lm = &ssd->lm;
     struct line *curline = NULL;
+    if(type == DATA_PAGE)
+        wpp = &ssd->wp;
+    else if(type == TRANS_PAGE)
+        wpp = &ssd->trans_wp;
+    
     /* make sure lines are already initialized by now */
     curline = QTAILQ_FIRST(&lm->free_line_list);
     QTAILQ_REMOVE(&lm->free_line_list, curline, entry);
     lm->free_line_cnt--;
+
+    curline->type = type;
+
     /* wpp->curline is always our onging line for writes */
     wpp->curline = curline;
     wpp->ch = 0;
     wpp->lun = 0;
     wpp->pg = 0;
-    wpp->blk = 0;
+    wpp->blk = curline->id;
     wpp->pl = 0;
 }
 
@@ -139,7 +160,7 @@ static inline void check_addr(int a, int max)
     assert(a >= 0 && a < max);
 }
 
-static struct line *get_next_free_line(struct ssd *ssd)
+static struct line *get_next_free_line(struct ssd *ssd, int type)
 {
     struct line_mgmt *lm = &ssd->lm;
     struct line *curline = NULL;
@@ -152,14 +173,21 @@ static struct line *get_next_free_line(struct ssd *ssd)
 
     QTAILQ_REMOVE(&lm->free_line_list, curline, entry);
     lm->free_line_cnt--;
+
+    curline->type = type;
     return curline;
 }
 
-static void ssd_advance_write_pointer(struct ssd *ssd)
+static void ssd_advance_write_pointer(struct ssd *ssd, int type)
 {
     struct ssdparams *spp = &ssd->sp;
-    struct write_pointer *wpp = &ssd->wp;
+    //struct write_pointer *wpp = &ssd->wp;
+    struct write_pointer *wpp;
     struct line_mgmt *lm = &ssd->lm;
+    if(type == DATA_PAGE)
+        wpp = &ssd->wp;
+    else if(type == TRANS_PAGE)
+        wpp = &ssd->trans_wp;
 
     check_addr(wpp->ch, spp->nchs);
     wpp->ch++;
@@ -194,7 +222,7 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
                 check_addr(wpp->blk, spp->blks_per_pl);
                 /* TODO: how should we choose the next block for writes */
                 wpp->curline = NULL;
-                wpp->curline = get_next_free_line(ssd);
+                wpp->curline = get_next_free_line(ssd, type);
                 if (!wpp->curline) {
                     abort();
                 }
@@ -212,10 +240,16 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
     //printf("Next,ch:%d,lun:%d,blk:%d,pg:%d\n", wpp->ch, wpp->lun, wpp->blk, wpp->pg);
 }
 
-static struct ppa get_new_page(struct ssd *ssd)
+static struct ppa get_new_page(struct ssd *ssd, int type)
 {
-    struct write_pointer *wpp = &ssd->wp;
+    //struct write_pointer *wpp = &ssd->wp;
+    struct write_pointer *wpp;
     struct ppa ppa;
+    if(type == DATA_PAGE)
+        wpp = &ssd->wp;
+    else if(type == TRANS_PAGE)
+        wpp = &ssd->trans_wp;
+
     ppa.ppa = 0;
     ppa.g.ch = wpp->ch;
     ppa.g.lun = wpp->lun;
@@ -355,6 +389,19 @@ static void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp)
     ch->busy = 0;
 }
 
+#ifdef DFTL
+static void ssd_init_gtd(struct ssd *ssd)
+{
+    int i;
+    struct ssdparams *spp = &ssd->sp;
+
+    ssd->gtd = g_malloc0(sizeof(struct ppa) * (spp->tt_pgs / ENTRY_PER_PAGE));
+    for (i = 0; i < (spp->tt_pgs / ENTRY_PER_PAGE); i++) {
+        ssd->gtd[i].ppa = UNMAPPED_PPA;
+    }
+}
+#endif
+
 static void ssd_init_maptbl(struct ssd *ssd)
 {
     int i;
@@ -395,6 +442,14 @@ void ssd_init(FemuCtrl *n)
     /* initialize maptbl */
     ssd_init_maptbl(ssd);
 
+#ifdef DFTL
+    /* init gtd */
+    ssd_init_gtd(ssd);
+
+    /* init dftl */
+    init_dftl(ssd);
+#endif
+
     /* initialize rmap */
     ssd_init_rmap(ssd);
 
@@ -402,7 +457,12 @@ void ssd_init(FemuCtrl *n)
     ssd_init_lines(ssd);
 
     /* initialize write pointer, this is how we allocate new pages for writes */
-    ssd_init_write_pointer(ssd);
+    ssd_init_write_pointer(ssd, DATA_PAGE);
+
+#if TRANS
+    /* init trans write pointer */
+    ssd_init_write_pointer(ssd, TRANS_PAGE);
+#endif
 
     /**initialize chunkbuffer**/
     init_chunkbuffer(ssd);
@@ -546,6 +606,13 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     return lat;
 }
 
+static uint64_t ssd_advance_status_delay(struct ssd *ssd, struct ppa *ppa,
+        struct nand_cmd *ncmd, uint64_t lat)
+{
+    ncmd->stime += lat;
+    return ssd_advance_status(ssd, ppa, ncmd) + lat;
+}
+
 /* update SSD status about one page from PG_VALID -> PG_VALID */
 static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
 {
@@ -598,6 +665,13 @@ static void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
 
     /* update page status */
     pg = get_pg(ssd, ppa);
+    if(pg->status != PG_FREE)
+    {
+        printf("ch: %d, lun: %d, pl: %d, blk: %d, pg: %d\n", ppa->g.ch, ppa->g.lun, ppa->g.pl, ppa->g.blk, ppa->g.pg);
+        printf("wp: ch: %d, lun: %d, pl: %d, blk: %d, pg: %d\n", ssd->wp.ch, ssd->wp.lun, ssd->wp.pl, ssd->wp.blk, ssd->wp.pg);
+        printf("twp: ch: %d, lun: %d, pl: %d, blk: %d, pg: %d\n", ssd->trans_wp.ch, ssd->trans_wp.lun, ssd->trans_wp.pl, ssd->trans_wp.blk, ssd->trans_wp.pg);
+        printf("pg_status: %d\n", pg->status);
+    }
     assert(pg->status == PG_FREE);
     pg->status = PG_VALID;
 
@@ -647,6 +721,36 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
     }
 }
 
+static uint64_t gc_write_trans_page(struct ssd *ssd, struct ppa *old_ppa)
+{
+    struct ppa new_ppa;
+    struct nand_lun *new_lun;
+    uint64_t t_vpn = get_rmap_ent(ssd, old_ppa);
+
+    new_ppa = get_new_page(ssd, TRANS_PAGE);
+    /* update gtd */
+    set_gtd_ent(ssd, t_vpn, &new_ppa);
+    /* update rgtd */
+    set_rmap_ent(ssd, t_vpn, &new_ppa);
+    
+    mark_page_valid(ssd, &new_ppa);
+
+    ssd_advance_write_pointer(ssd, TRANS_PAGE);
+    
+    if (ssd->sp.enable_gc_delay) {
+        struct nand_cmd gcw;
+        gcw.type = GC_IO;
+        gcw.cmd = NAND_WRITE;
+        gcw.stime = 0;
+        ssd_advance_status(ssd, &new_ppa, &gcw);
+    }
+
+    new_lun = get_lun(ssd, &new_ppa);
+    new_lun->gc_endtime = new_lun->next_lun_avail_time;
+
+    return 0;
+}
+
 /* move valid page data (already in DRAM) from victim line to a new page */
 static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 {
@@ -658,7 +762,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     //set_rmap(ssd, lpn, new_ppa);
 
     assert(valid_lpn(ssd, lpn));
-    new_ppa = get_new_page(ssd);
+    new_ppa = get_new_page(ssd, DATA_PAGE);
     /* update maptbl */
     set_maptbl_ent(ssd, lpn, &new_ppa);
     /* update rmap */
@@ -668,7 +772,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     mark_page_valid(ssd, &new_ppa);
 
     /* need to advance the write pointer here */
-    ssd_advance_write_pointer(ssd);
+    ssd_advance_write_pointer(ssd, DATA_PAGE);
 
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
@@ -730,7 +834,7 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
 }
 
 /* here ppa identifies the block we want to clean */
-static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
+static void clean_one_block(struct ssd *ssd, struct ppa *ppa, int type)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_block *blk = get_blk(ssd, ppa);
@@ -746,7 +850,10 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
             /* delay the maptbl update until "write" happens */
-            gc_write_page(ssd, ppa);
+            if(type == DATA_PAGE)
+                gc_write_page(ssd, ppa);
+            else if(type == TRANS_PAGE)
+                gc_write_trans_page(ssd, ppa);
             cnt++;
         }
     }
@@ -761,6 +868,7 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     struct line *line = get_line(ssd, ppa);
     line->ipc = 0;
     line->vpc = 0;
+    line->type = -1;                //mark line free
     /* move this line to free line list */
     QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
     lm->free_line_cnt++;
@@ -775,6 +883,7 @@ static int do_gc(struct ssd *ssd, bool force)
     struct nand_lun *lunp;
     struct ppa ppa;
     int ch, lun;
+    int type;
 
     victim_line = select_victim_line(ssd, force);
     if (!victim_line) {
@@ -783,6 +892,7 @@ static int do_gc(struct ssd *ssd, bool force)
         return -1;
     }
 
+    type = victim_line->type;                       //get line's type
     ppa.g.blk = victim_line->id;
     /*printf("Coperd,%s,FTL,GCing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n",
             ssd->ssdname, ppa.g.blk, victim_line->ipc, ssd->lm.victim_line_cnt,
@@ -795,7 +905,7 @@ static int do_gc(struct ssd *ssd, bool force)
             ppa.g.pl = 0;
             //chp = get_ch(ssd, &ppa);
             lunp = get_lun(ssd, &ppa);
-            clean_one_block(ssd, &ppa);
+            clean_one_block(ssd, &ppa, type);
             mark_block_free(ssd, &ppa);
 
             if (spp->enable_gc_delay) {
@@ -871,10 +981,349 @@ static void *ftl_thread(void *arg)
     }
 }
 
-/**wk**/
-int init_chunkbuffer(struct ssd* ssd)
+#ifdef DFTL
+
+int init_dftl(struct ssd *ssd)
 {
-	struct chunk_buffer_info* cb_info = (struct chunk_buffer_info*)malloc(sizeof(struct chunk_buffer_info));
+    struct mapping_cache_info *mc_info = (struct mapping_cache_info *)malloc(sizeof(struct mapping_cache_info));
+    assert(mc_info);
+    
+    mc_info->cur_size = 0;
+    mc_info->max_size = MAX_MAPPING_CAHCHE_SIZE;
+
+    mc_info->head = NULL;
+    mc_info->tail = NULL;
+
+    mc_info->dftl_rhit = 0;
+    mc_info->dftl_rmiss = 0;
+    mc_info->dftl_whit = 0;
+    mc_info->dftl_wmiss = 0;
+
+    mc_info->hashmap = (struct map_entry_node **)malloc(sizeof(struct map_entry_node *) * DFTL_HASH_MAP_SIZE);
+    assert(mc_info->hashmap);
+
+    for(int i = 0; i < DFTL_HASH_MAP_SIZE; i++)
+        mc_info->hashmap[i] = NULL;
+    
+    ssd->mc_info = mc_info;
+
+    return 0;
+}
+
+struct map_entry_node *dftl_lookup_hashmap(struct mapping_cache_info *mc_info, uint64_t tvpn)
+{
+    uint64_t hashkey = tvpn;
+    uint64_t index = hashkey % DFTL_HASH_MAP_SIZE;
+
+    struct map_entry_node *tmp;
+    tmp = mc_info->hashmap[index];
+
+    while(tmp != NULL)
+    {
+        if(tmp->tvpn == tvpn)
+        {
+            return tmp;
+        }
+
+        tmp = tmp->next;
+    }
+
+    return tmp;
+}
+
+void dftl_add_2_hashmap(struct mapping_cache_info *mc_info, struct map_entry_node *new_node)
+{
+    //printf("2.0!\n");
+    uint64_t hashkey = new_node->tvpn;
+    uint64_t index = hashkey % DFTL_HASH_MAP_SIZE;
+
+    struct map_entry_node *tmp;
+    tmp = mc_info->hashmap[index];
+
+    if(tmp == NULL) {
+        mc_info->hashmap[index] = new_node;
+    }
+    else {
+        while(tmp->hashnext != NULL) {
+            tmp = tmp->hashnext;
+        }
+
+        tmp->hashnext = new_node;
+        new_node->hashpre = tmp;
+    }
+}
+
+void dftl_del_from_hashmap(struct mapping_cache_info *mc_info, struct map_entry_node *victim)
+{
+    uint64_t hashkey = victim->tvpn;
+    uint64_t index = hashkey % DFTL_HASH_MAP_SIZE;
+    
+    if(mc_info->hashmap[index] == victim) {
+        if(victim->hashpre == NULL) {
+            mc_info->hashmap[index] = victim->hashnext;
+
+            if(victim->hashnext != NULL) {
+                victim->hashnext->hashpre = NULL;
+            }
+        }
+        else
+            printf("del_from_hashmap error!\n");
+    }
+    else {
+        victim->hashpre->hashnext = victim->hashnext;
+        if(victim->hashnext != NULL){
+            victim->hashnext->hashpre = victim->hashpre;
+        }
+    }
+    
+    victim->hashnext = NULL;
+    victim->hashpre = NULL;
+}
+
+int dftl_look_up(struct ssd *ssd, uint64_t lpn)
+{
+    struct mapping_cache_info* mc_info = ssd->mc_info;
+    struct map_entry_node *tmp;
+    uint64_t tvpn = lpn / ENTRY_PER_PAGE;
+    uint64_t offset = lpn % ENTRY_PER_PAGE;
+
+    tmp = dftl_lookup_hashmap(mc_info, tvpn);
+    if(tmp != NULL) {
+        if(tmp == mc_info->head);
+        else if(tmp == mc_info->tail) {
+            tmp->pre->next = NULL;
+            mc_info->tail = tmp->pre;
+            tmp->pre = NULL;
+            tmp->next = mc_info->head;
+            mc_info->head->pre = tmp;
+            mc_info->head = tmp;
+        }
+        else {
+            tmp->pre->next = tmp->next;
+            tmp->next->pre = tmp->pre;
+            tmp->pre = NULL;
+            tmp->next = mc_info->head;
+            mc_info->head->pre = tmp;
+            mc_info->head = tmp;
+        }
+
+        if(tmp->bitmap[offset] == 1)
+            return 1;
+        else
+            return 0;
+    }
+
+    return -1;
+}
+
+int dftl_lru_evict(struct mapping_cache_info *mc_info, struct map_entry_node *victim)
+{
+    if(victim == mc_info->head)
+    {
+        mc_info->head = NULL;
+        mc_info->tail = NULL;
+    }
+    else
+    {
+        mc_info->tail = victim->pre;
+        mc_info->tail->next = NULL;
+    }
+
+    dftl_del_from_hashmap(mc_info, victim);
+#if DFTL_DEBUG
+    printf("evict: %lu\n", victim->tvpn);
+#endif
+    return 0;
+}
+
+int dftl_lru_add_new_node(struct mapping_cache_info *mc_info, uint64_t lpn, int res)
+{
+    uint64_t tvpn = lpn / ENTRY_PER_PAGE;
+    uint64_t offset = lpn % ENTRY_PER_PAGE;
+
+    if(res == -1)
+    {
+        struct map_entry_node *new_node = (struct map_entry_node *)malloc(sizeof(struct map_entry_node));
+
+        assert(new_node);
+
+        memset(new_node->bitmap, 0, sizeof(char) * ENTRY_PER_PAGE);
+        memset(new_node->dirty, 0, sizeof(char) * ENTRY_PER_PAGE);
+        new_node->tvpn = 0;
+        new_node->pre = NULL;
+        new_node->next = NULL;
+        new_node->hashpre = NULL;
+        new_node->hashnext = NULL;
+        new_node->entry_cnt[0] = 0;
+        new_node->entry_cnt[1] = 0;
+        new_node->dirty_cnt[0] = 0;
+        new_node->dirty_cnt[1] = 0;
+
+        //new_node->bitmap[offset] = 1;
+        //new_node->lcn = lcn;
+        //new_node->size++;
+        new_node->entry_cnt[0] = ENTRY_PER_PAGE;
+        for(int i = 0; i < ENTRY_PER_PAGE; i++)
+            new_node->bitmap[i] = 1;
+        new_node->tvpn = tvpn;
+
+        if(mc_info->head == NULL)
+        {
+            mc_info->head = new_node;
+            mc_info->tail = new_node;
+        }
+        else
+        {
+            mc_info->head->pre = new_node;
+            new_node->next = mc_info->head;
+            mc_info->head = new_node;
+        }
+
+        dftl_add_2_hashmap(mc_info, new_node);
+
+        mc_info->cur_size += new_node->entry_cnt[0];
+#if DFTL_DEBUG
+        printf("add： %lu\n", new_node->tvpn);
+#endif
+    }
+    else
+        printf("error in dftl_lru_add_new_node()!\n");
+
+    return 0;
+}
+
+void dftl_set_dirty(struct mapping_cache_info *mc_info, uint64_t lpn)
+{
+    struct map_entry_node *tmp = mc_info->head;
+    uint64_t tvpn = lpn / ENTRY_PER_PAGE;
+    uint64_t offset = lpn % ENTRY_PER_PAGE;
+    if(tmp && tvpn == tmp->tvpn)
+    {
+        tmp->dirty[offset] = 1;
+        tmp->dirty_cnt[0]++;
+    }
+    else
+        printf("error in dftl_set_dirty()\n");
+}
+
+uint64_t write_back_trans_page(struct ssd *ssd, uint64_t tvpn, int64_t stime)
+{
+    struct ppa ppa;
+    uint64_t sublat = 0;
+
+    ppa = get_gtd_ent(ssd, tvpn);
+    if(mapped_ppa(&ppa))
+    {
+        mark_page_invalid(ssd, &ppa);
+        set_rmap_ent(ssd, INVALID_LPN, &ppa);
+    }
+    /* new write */
+    /* find a new page */
+    ppa = get_new_page(ssd, TRANS_PAGE);
+    /* update gtd */
+    set_gtd_ent(ssd, tvpn, &ppa);
+    /* update rmap */
+    set_rmap_ent(ssd, tvpn, &ppa);
+
+    mark_page_valid(ssd, &ppa);
+
+    /* need to advance the write pointer here */
+    ssd_advance_write_pointer(ssd, TRANS_PAGE);
+
+    struct nand_cmd swr;
+    swr.type = TRANS_IO;
+    swr.cmd = NAND_WRITE;
+    swr.stime = stime;
+    /* get latency statistics */
+    sublat = ssd_advance_status(ssd, &ppa, &swr);
+#if DFTL_DEBUG
+    printf("writeback trans page: %lu\n", tvpn);
+#endif
+    return sublat;
+}
+
+int64_t dftl_load_entry(struct ssd *ssd, struct ppa ppa, int64_t stime, uint64_t lat)
+{
+        struct nand_cmd srd;
+        srd.type = TRANS_IO;
+        srd.cmd = NAND_READ;
+        srd.stime = stime;
+        return ssd_advance_status_delay(ssd, &ppa, &srd, lat);
+}
+
+int dftl_test(struct ssd *ssd, uint64_t lpn, int op)
+{
+    if(op == WRITE)
+        printf("WRITE lpn：%lu\n", lpn);
+    else if(op == READ)
+        printf("READ  lpn: %lu\n", lpn);
+    
+    printf("mc cursize: %d,", ssd->mc_info->cur_size/ENTRY_PER_PAGE);
+    if(ssd->mc_info->head)
+        printf("%lu, ", ssd->mc_info->head->tvpn);
+    if(ssd->mc_info->tail)
+        printf("%lu\n", ssd->mc_info->tail->tvpn);
+
+    return 0;
+}
+
+int64_t dftl_translate(struct ssd* ssd, uint64_t lpn, int op, int64_t stime)
+{
+    struct mapping_cache_info* mc_info = ssd->mc_info;
+    struct map_entry_node* victim = NULL;
+    int add_size = ENTRY_PER_PAGE;
+    uint64_t tvpn = lpn / ENTRY_PER_PAGE;
+    uint64_t offset = lpn % ENTRY_PER_PAGE;
+    uint64_t sublat = 0;
+    uint64_t maxlat = 0;
+    struct ppa ppa;
+
+#if DFTL_DEBUG
+    dftl_test(ssd, lpn, op);
+#endif
+    int res;
+    res = dftl_look_up(ssd, lpn);
+    if(res <= 0)
+    {
+        while(mc_info->cur_size + add_size > mc_info->max_size)
+        {
+            victim = mc_info->tail;
+
+            if(victim)
+            {
+                if(victim->dirty_cnt[0] > 0)
+                    sublat = write_back_trans_page(ssd, victim->tvpn, stime);
+                dftl_lru_evict(ssd->mc_info, victim);
+                mc_info->cur_size -= victim->entry_cnt[0];
+
+                free(victim);
+                victim = NULL;
+            }
+
+            maxlat = maxlat > sublat ? maxlat : sublat;
+        }
+        ppa = get_gtd_ent(ssd, tvpn);
+        if(mapped_ppa(&ppa))             //tvpn-ppn exist
+            maxlat = dftl_load_entry(ssd, ppa, stime, maxlat);
+
+        dftl_lru_add_new_node(ssd->mc_info, lpn, res);
+    }
+    if(op == WRITE)
+        dftl_set_dirty(ssd->mc_info, lpn);                     //op => setdirty
+
+#if DFTL_DEBUG
+    dftl_test(ssd, lpn, op);
+#endif
+
+    return maxlat;
+}
+
+#endif
+
+/**wk**/
+int init_chunkbuffer(struct ssd *ssd)
+{
+	struct chunk_buffer_info *cb_info = (struct chunk_buffer_info *)malloc(sizeof(struct chunk_buffer_info));
 	assert(cb_info);
 
 	cb_info->cur_size = 0;
@@ -890,7 +1339,7 @@ int init_chunkbuffer(struct ssd* ssd)
     cb_info->hashmap = (struct chunk_node **)malloc(sizeof(struct chunk_node *) * HASH_MAP_SIZE);
     assert(cb_info->hashmap);
 
-    for(int i; i < HASH_MAP_SIZE; i++)
+    for(int i = 0; i < HASH_MAP_SIZE; i++)
         cb_info->hashmap[i] = NULL;
 
 	ssd->cb_info = cb_info;
@@ -1142,7 +1591,7 @@ uint64_t write_back_page(struct ssd *ssd, uint64_t lpn, int64_t stime)
 
     /* new write */
     /* find a new page */
-    ppa = get_new_page(ssd);
+    ppa = get_new_page(ssd, DATA_PAGE);
     /* update maptbl */
     set_maptbl_ent(ssd, lpn, &ppa);
     /* update rmap */
@@ -1151,7 +1600,7 @@ uint64_t write_back_page(struct ssd *ssd, uint64_t lpn, int64_t stime)
     mark_page_valid(ssd, &ppa);
 
     /* need to advance the write pointer here */
-    ssd_advance_write_pointer(ssd);
+    ssd_advance_write_pointer(ssd, DATA_PAGE);
 
     struct nand_cmd swr;
     swr.type = USER_IO;
@@ -1176,10 +1625,13 @@ uint64_t write_back_chunk(struct ssd *ssd, struct chunk_node *victim, int64_t st
     {
         if(victim->bitmap[i] != 1)
             continue;
-        
+
         uint64_t lpn = start_lpn + i;
         curlat = write_back_page(ssd, lpn, stime);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+#ifdef DFTL
+        dftl_translate(ssd, lpn, WRITE, stime);
+#endif
     }
 
     return maxlat;
@@ -1208,19 +1660,35 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
         ssd->cb_info->rbuffer_miss++;
         ppa = get_maptbl_ent(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
-            //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
-            //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
+            if(!mapped_ppa(&ppa))
+                printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
+            //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n", 
             //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
             //continue;
             return 0;
         }
+        uint64_t dftl_delay = 0;
+#ifdef DFTL
+        dftl_delay = dftl_translate(ssd, lpn, READ, stime);
+        if(dftl_delay == 0)
+            ssd->mc_info->dftl_rhit++;
+        else
+            ssd->mc_info->dftl_rmiss++;
+
+        //if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) % 10000 == 0)
+            //printf("dftl rhit rate: %.5f, hit: %lu, miss: %lu\n", (double)ssd->mc_info->dftl_rhit/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit), 
+            //ssd->mc_info->dftl_rhit, ssd->mc_info->dftl_rmiss);
+
+        //stime += dftl_delay;
+#endif
         struct nand_cmd srd;
         srd.type = USER_IO;
         srd.cmd = NAND_READ;
         srd.stime = stime;
-        sublat = ssd_advance_status(ssd, &ppa, &srd);
+        sublat = ssd_advance_status_delay(ssd, &ppa, &srd, dftl_delay);
     }
-    
+    //if((ssd->cb_info->rbuffer_hit + ssd->cb_info->rbuffer_miss) % 10000 == 0)
+        //printf("rbuffer hit:%lu, rbuffer miss: %lu\n", ssd->cb_info->rbuffer_hit, ssd->cb_info->rbuffer_miss);
     return sublat;
 }
 
@@ -1228,6 +1696,7 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
 uint64_t ssd_buffer_write(struct ssd *ssd, uint64_t lpn, int64_t stime)
 {
     uint64_t sublat = 0;
+    uint64_t maxlat = 0;
     int add_size = NODE_ADD_SIZE;
     struct chunk_buffer_info *cb_info = ssd->cb_info;
     struct chunk_node *victim = NULL;
@@ -1252,6 +1721,7 @@ uint64_t ssd_buffer_write(struct ssd *ssd, uint64_t lpn, int64_t stime)
                 free(victim);
                 victim = NULL;
             }
+            maxlat = maxlat > sublat? maxlat : sublat;
         }
 
         lru_add_new_node(cb_info, lpn, res);
@@ -1265,7 +1735,7 @@ uint64_t ssd_buffer_write(struct ssd *ssd, uint64_t lpn, int64_t stime)
         
     }
 
-    return sublat;
+    return maxlat;
 }
 
 /* accept NVMe cmd as input, in order to support more command types in future */
@@ -1347,7 +1817,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 #else
             ppa = get_maptbl_ent(ssd, lpn);
             if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
-                //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
+                printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
                 //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
                 //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
                 continue;
@@ -1415,7 +1885,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         /* new write */
         /* find a new page */
-        ppa = get_new_page(ssd);
+        ppa = get_new_page(ssd, DATA_PAGE);
         /* update maptbl */
         set_maptbl_ent(ssd, lpn, &ppa);
         /* update rmap */
@@ -1424,7 +1894,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         mark_page_valid(ssd, &ppa);
 
         /* need to advance the write pointer here */
-        ssd_advance_write_pointer(ssd);
+        ssd_advance_write_pointer(ssd, DATA_PAGE);
 
         struct nand_cmd swr;
         swr.type = USER_IO;
