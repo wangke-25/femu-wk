@@ -28,6 +28,7 @@
         "streambuf": "c",
         "system_error": "c",
         "typeinfo": "c",
-        "memory_resource": "c"
+        "memory_resource": "c",
+        "initializer_list": "c"
     }
 }
