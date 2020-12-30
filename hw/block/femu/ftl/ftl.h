@@ -5,7 +5,7 @@
 #include "qemu/thread.h"
 
 #include "chunkbuffer.h"
-#include "dftl.h"
+#include "taichi.h"
 
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))

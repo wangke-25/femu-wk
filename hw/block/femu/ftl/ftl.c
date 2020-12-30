@@ -395,8 +395,12 @@ static void ssd_init_gtd(struct ssd *ssd)
     int i;
     struct ssdparams *spp = &ssd->sp;
 
-    ssd->gtd = g_malloc0(sizeof(struct ppa) * (spp->tt_pgs / ENTRY_PER_PAGE));
+    /*ssd->gtd = g_malloc0(sizeof(struct ppa) * (spp->tt_pgs / ENTRY_PER_PAGE) + 1);
     for (i = 0; i < (spp->tt_pgs / ENTRY_PER_PAGE); i++) {
+        ssd->gtd[i].ppa = UNMAPPED_PPA;
+    }*/
+    ssd->gtd = g_malloc0(sizeof(struct ppa) * (spp->tt_pgs / (ENTRY_PER_PAGE/2)) + 1);
+    for (i = 0; i < (spp->tt_pgs / (ENTRY_PER_PAGE/2)); i++) {
         ssd->gtd[i].ppa = UNMAPPED_PPA;
     }
 }
@@ -983,6 +987,23 @@ static void *ftl_thread(void *arg)
 
 #ifdef DFTL
 
+int init_taichi(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    struct chunk_map_info *ckm_info = (struct chunk_map_info *)malloc(sizeof(struct chunk_map_info));
+    ckm_info->bitmap = (char *)malloc(sizeof(char) * spp->tt_pgs);
+    ckm_info->chunk_page_cnt = (int *)malloc(sizeof(int) * spp->tt_pgs/PAGES_PER_CHUNK + 1);
+
+    ckm_info->chunk_map_cnt = 0;
+    ckm_info->page_map_cnt = 0;
+    ckm_info->update_cnt = 0;
+
+    ssd->mc_info->ckm_info = ckm_info;
+
+    return 0;
+}
+
 int init_dftl(struct ssd *ssd)
 {
     struct mapping_cache_info *mc_info = (struct mapping_cache_info *)malloc(sizeof(struct mapping_cache_info));
@@ -1004,8 +1025,10 @@ int init_dftl(struct ssd *ssd)
 
     for(int i = 0; i < DFTL_HASH_MAP_SIZE; i++)
         mc_info->hashmap[i] = NULL;
-    
+
     ssd->mc_info = mc_info;
+
+    init_taichi(ssd);
 
     return 0;
 }
@@ -1159,12 +1182,13 @@ int dftl_lru_add_new_node(struct mapping_cache_info *mc_info, uint64_t lpn, int 
         new_node->dirty_cnt[0] = 0;
         new_node->dirty_cnt[1] = 0;
 
-        //new_node->bitmap[offset] = 1;
-        //new_node->lcn = lcn;
-        //new_node->size++;
-        new_node->entry_cnt[0] = ENTRY_PER_PAGE;
-        for(int i = 0; i < ENTRY_PER_PAGE; i++)
-            new_node->bitmap[i] = 1;
+        //new_node->entry_cnt[0] = ENTRY_PER_PAGE;
+        //for(int i = 0; i < ENTRY_PER_PAGE; i++)
+            //new_node->bitmap[i] = 1;
+        if(offset < ENTRY_PER_PAGE/2)
+            new_node->entry_cnt[0]++;
+        else
+            new_node->entry_cnt[1]++;
         new_node->tvpn = tvpn;
 
         if(mc_info->head == NULL)
@@ -1181,10 +1205,21 @@ int dftl_lru_add_new_node(struct mapping_cache_info *mc_info, uint64_t lpn, int 
 
         dftl_add_2_hashmap(mc_info, new_node);
 
-        mc_info->cur_size += new_node->entry_cnt[0];
+        mc_info->cur_size++;
 #if DFTL_DEBUG
         printf("add： %lu\n", new_node->tvpn);
 #endif
+    }
+    else if(res == 0)
+    {
+        struct map_entry_node *tmp = mc_info->head;
+        tmp->bitmap[offset] = 1;
+        if(offset < ENTRY_PER_PAGE/2)
+            tmp->entry_cnt[0]++;
+        else
+            tmp->entry_cnt[1]++;
+
+        mc_info->cur_size++;
     }
     else
         printf("error in dftl_lru_add_new_node()!\n");
@@ -1199,8 +1234,13 @@ void dftl_set_dirty(struct mapping_cache_info *mc_info, uint64_t lpn)
     uint64_t offset = lpn % ENTRY_PER_PAGE;
     if(tmp && tvpn == tmp->tvpn)
     {
-        tmp->dirty[offset] = 1;
-        tmp->dirty_cnt[0]++;
+        if(tmp->dirty[offset] == 0){
+            tmp->dirty[offset] = 1;
+            if(offset < ENTRY_PER_PAGE/2)
+                tmp->dirty_cnt[0]++;
+            else
+                tmp->dirty_cnt[1]++;
+        }
     }
     else
         printf("error in dftl_set_dirty()\n");
@@ -1242,7 +1282,7 @@ uint64_t write_back_trans_page(struct ssd *ssd, uint64_t tvpn, int64_t stime)
     return sublat;
 }
 
-int64_t dftl_load_entry(struct ssd *ssd, struct ppa ppa, int64_t stime, uint64_t lat)
+uint64_t dftl_load_entry(struct ssd *ssd, struct ppa ppa, int64_t stime, uint64_t lat)
 {
         struct nand_cmd srd;
         srd.type = TRANS_IO;
@@ -1267,7 +1307,7 @@ int dftl_test(struct ssd *ssd, uint64_t lpn, int op)
     return 0;
 }
 
-int64_t dftl_translate(struct ssd* ssd, uint64_t lpn, int op, int64_t stime)
+uint64_t dftl_translate(struct ssd* ssd, uint64_t lpn, int op, int64_t stime)
 {
     struct mapping_cache_info* mc_info = ssd->mc_info;
     struct map_entry_node* victim = NULL;
@@ -1316,6 +1356,273 @@ int64_t dftl_translate(struct ssd* ssd, uint64_t lpn, int op, int64_t stime)
 #endif
 
     return maxlat;
+}
+
+uint64_t taichi_add2_pagemap(struct ssd *ssd, uint64_t lpn, int64_t stime, int op, int res)
+{
+    struct mapping_cache_info *mc_info = ssd->mc_info;
+    struct map_entry_node *victim;
+    struct ppa ppa;
+    uint64_t sublat0 = 0;
+    uint64_t sublat1 = 0;
+    uint64_t maxlat = 0;
+    int add_size = 1;
+
+    while(mc_info->cur_size + add_size > mc_info->max_size)
+    {
+        victim = mc_info->tail;
+
+        if(victim)
+        {
+            if(victim->dirty[0] > 0)
+                sublat0 = write_back_trans_page(ssd, (victim->tvpn * 2), stime);
+            if(victim->dirty[1] > 0)
+                sublat1 = write_back_trans_page(ssd, (victim->tvpn * 2 + 1), stime);
+            dftl_lru_evict(ssd->mc_info, victim);
+            mc_info->cur_size -= victim->entry_cnt[0];
+            mc_info->cur_size -= victim->entry_cnt[1];
+
+            free(victim);
+            victim = NULL;
+            sublat1 = sublat0 > sublat1? sublat0 : sublat1;
+        }
+        maxlat = maxlat > sublat1? maxlat : sublat1;
+    }
+    
+    ppa = get_gtd_ent(ssd, GTD_INDEX(lpn));
+    if(mapped_ppa(&ppa))
+        maxlat = dftl_load_entry(ssd, ppa, stime, maxlat);
+
+    dftl_lru_add_new_node(ssd->mc_info, lpn, res);
+    
+    if(op == WRITE)
+        dftl_set_dirty(ssd->mc_info, lpn); 
+
+    return maxlat;
+}
+
+void taichi_del_from_pagemap(struct ssd *ssd, uint64_t lpn)
+{
+    struct mapping_cache_info *mc_info = ssd->mc_info;
+    uint64_t tvpn = lpn / ENTRY_PER_PAGE;
+    uint64_t offset = lpn % ENTRY_PER_PAGE;
+    int res;
+
+    res = dftl_look_up(ssd, lpn);
+    if(res == 1)
+    {
+        struct map_entry_node *tmp = mc_info->head;
+        if(tmp)
+        {
+            if(tmp->bitmap[offset] == 1)
+            {
+                tmp->bitmap[offset] = 0;
+                if(offset < ENTRY_PER_PAGE/2)
+                    tmp->entry_cnt[0]--;
+                else
+                    tmp->entry_cnt[1]--;
+
+                mc_info->cur_size--;
+                
+                if(tmp->dirty[offset] == 1)
+                {
+                    tmp->dirty[offset] = 0;
+                    if(offset < ENTRY_PER_PAGE/2)
+                        tmp->dirty_cnt[0]--;
+                    else
+                        tmp->dirty_cnt[1]--;
+                }
+                
+                if(tmp->entry_cnt[0] + tmp->entry_cnt[1] == 0)
+                {
+                    if(tmp->dirty_cnt[0] + tmp->dirty_cnt[1] == 0)
+                    {
+                        if (tmp == mc_info->head || tmp == mc_info->tail)
+                        {
+                            if (tmp == mc_info->head && tmp == mc_info->tail)
+                            {
+                                mc_info->head = NULL;
+                                mc_info->tail = NULL;
+                            }
+                            else if (tmp == mc_info->head)
+                            {
+                                tmp->next->pre = NULL;
+                                mc_info->head = tmp->next;
+                            }
+                            else if (tmp == mc_info->tail)
+                            {
+                                tmp->pre->next = NULL;
+                                mc_info->tail = tmp->pre;
+                            }
+                        }
+                        else
+                        {
+                            tmp->pre->next = tmp->next;
+                            tmp->next->pre = tmp->pre;
+                        }
+                        dftl_del_from_hashmap(ssd->mc_info, tmp);
+
+                        free(tmp);
+                        tmp = NULL;
+                    }
+                    else
+                        printf("error in taichi_del_from_pagemap1!\n");
+                }
+            }
+            else
+                printf("error in taichi_del_from_pagemap2!\n");
+        }
+    }
+    
+}
+
+uint64_t taichi_trans_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
+{
+    struct mapping_cache_info *mc_info = ssd->mc_info;
+    uint64_t lat = 0;
+    struct ppa ppa;
+
+    if(mc_info->ckm_info->bitmap[lpn] == 1)
+        lat = 0;
+    else {
+        int res = dftl_look_up(ssd, lpn);
+        if(res != 1) {
+            lat = taichi_add2_pagemap(ssd, lpn, stime, READ, res);
+            //ppa = get_gtd_ent(ssd, GTD_INDEX(lpn));
+            //if(mapped_ppa(&ppa))
+                //lat = dftl_load_entry(ssd, ppa, stime, 0);
+            
+            //dftl_lru_add_new_node(ssd->mc_info, lpn, res);
+        }
+        else
+            lat = 0;
+    }
+
+}
+
+uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t stime)
+{
+    struct mapping_cache_info *mc_info = ssd->mc_info;
+    struct chunk_map_info *ckm_info = mc_info->ckm_info;
+    int update_size = 0;
+    uint64_t start_lpn = victim->lcn * PAGES_PER_CHUNK;
+    int cur_size = ckm_info->chunk_page_cnt[victim->lcn];
+    int write_size = victim->size;
+    uint64_t lat = 0;
+    uint64_t maxlat = 0;
+
+    int i;
+    for(i = 0; i < PAGES_PER_CHUNK; i++)
+    {
+        if(victim->bitmap[i] == 1 && ckm_info->bitmap[start_lpn+i] == 1)
+            update_size++;
+    }
+
+    if(write_size <= cur_size - update_size)                    //new page and update chunk page => page map
+    {
+        for(i = 0; i < PAGES_PER_CHUNK; i++)
+        {
+            lat = 0;
+            if(victim->bitmap[i] == 1)
+            {
+                if(ckm_info->bitmap[start_lpn+i] == 1)           //chunk map->page map(update)
+                {
+                    ckm_info->chunk_page_cnt[victim->lcn]--;
+
+                    ckm_info->update_cnt++;
+                    ckm_info->chunk_map_cnt--;
+                    ckm_info->page_map_cnt++;
+                }
+                else if(ckm_info->bitmap[start_lpn+i] == 0)    //page map->page map(update)
+                {
+                    ckm_info->update_cnt++;
+                }
+                else if(ckm_info->bitmap[start_lpn+i] == -1)    //null->page map
+                {
+                    ckm_info->page_map_cnt++;
+                }
+                else
+                    printf("update map error1!\n");
+                
+                int res = dftl_look_up(ssd, start_lpn+i);
+                if(res == 1)
+                {
+                    dftl_set_dirty(ssd, start_lpn+i);
+                }
+                else
+                    lat = taichi_add2_pagemap(ssd, start_lpn+i, stime, WRITE, res);
+                ckm_info->bitmap[start_lpn+i] = 0;
+            }
+            maxlat = maxlat > lat ? maxlat : lat;
+        }
+    }
+    else                                                     //new page and update page => chunk map
+    {
+        for(i = 0; i < PAGES_PER_CHUNK; i++)
+        {
+            lat = 0;
+            if(ckm_info->bitmap[start_lpn+i] == 1)
+            {
+                if(victim->bitmap[i] == 0)                  //chunk map->page map
+                {
+                    int res = dftl_look_up(ssd, start_lpn+i);
+                    if(res != 1)
+                        lat = taichi_add2_pagemap(ssd, start_lpn+i, stime, WRITE, res);
+                    else
+                        printf("update map error2!");
+                    
+                    ckm_info->bitmap[start_lpn+i] = 0;
+                    ckm_info->chunk_page_cnt[victim->lcn]--;
+
+                    ckm_info->chunk_map_cnt--;
+                    ckm_info->page_map_cnt++;
+                }
+                else                                        //chunk map->chunk map(update)
+                {
+                    ckm_info->update_cnt++;
+                }
+            }
+            else if(ckm_info->bitmap[start_lpn+i] == 0)
+            {
+                if(victim->bitmap[i] == 1)                  //page map->chunk map(update)
+                {
+                    taichi_del_from_pagemap(ssd, start_lpn+i);
+                    ckm_info->bitmap[start_lpn+i] = 1;
+                    ckm_info->chunk_page_cnt[victim->lcn]++;
+
+                    ckm_info->chunk_map_cnt++;
+                    ckm_info->page_map_cnt--;
+                    ckm_info->update_cnt++;
+                }
+            }
+            else if(ckm_info->bitmap[start_lpn+i] == -1)    //null->chunk map
+            {
+                if(victim->bitmap[i] == 1)
+                {
+                    ckm_info->bitmap[start_lpn+i] = 1;
+                    ckm_info->chunk_page_cnt[victim->lcn]++;
+
+                    ckm_info->chunk_map_cnt++;
+                }
+            }
+            maxlat = maxlat > lat ? maxlat : lat;
+        }
+    }
+
+    return maxlat;
+}
+
+uint64_t taichi_translate(struct ssd *ssd, uint64_t lpn, struct chunk_node *victim, int op, int64_t stime)
+{
+    uint64_t lat = 0;
+    if(op == READ)
+        lat = taichi_trans_read(ssd, lpn, stime);
+    else if(op == WRITE)
+        lat = taichi_trans_write(ssd, victim, stime);
+    else
+        printf("error in taichi_translate!");
+
+    return lat;
 }
 
 #endif

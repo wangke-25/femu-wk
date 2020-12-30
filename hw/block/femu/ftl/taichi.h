@@ -2,8 +2,8 @@
 #define __DFTL_H
 
 #define M 32
-#define N 64
-#define ENTRY_PER_PAGE 1024
+#define N 32
+#define ENTRY_PER_PAGE 1024             // M*N
 #define MAX_MAPPING_CAHCHE_SIZE (1024 * ENTRY_PER_PAGE)
 #define DFTL_HASH_MAP_SIZE 2048         //1024*2
 #define DFTL_NODE_ADD_SIZE 1
@@ -12,6 +12,8 @@
 #define READ 1
 
 #define DFTL_DEBUG 0
+
+#define GTD_INDEX(x) (x/(M*N/2))
 
 struct map_entry_node {
     unsigned long tvpn;
@@ -27,6 +29,15 @@ struct map_entry_node {
     struct map_entry_node *hashnext;
 };
 
+struct chunk_map_info {
+    char *bitmap;
+    int *chunk_page_cnt;
+
+    unsigned long update_cnt;
+    unsigned long page_map_cnt;
+    unsigned long chunk_map_cnt;
+};
+
 struct mapping_cache_info {
     int max_size;
     int cur_size;
@@ -40,6 +51,8 @@ struct mapping_cache_info {
     unsigned long dftl_rmiss;
     unsigned long dftl_whit;
     unsigned long dftl_wmiss;
+
+    struct chunk_map_info *ckm_info;
 };
 
 #endif
