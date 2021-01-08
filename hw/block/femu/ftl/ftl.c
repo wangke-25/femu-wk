@@ -1055,7 +1055,7 @@ struct map_entry_node *dftl_lookup_hashmap(struct mapping_cache_info *mc_info, u
             return tmp;
         }
 
-        tmp = tmp->next;
+        tmp = tmp->hashnext;
     }
 
     return tmp;
@@ -1529,6 +1529,7 @@ static inline void taichi_test(struct ssd *ssd, int flag)
     struct chunk_map_info *ckm_info = mc_info->ckm_info;
     struct map_entry_node *tmp = NULL;
 
+#if 0
     if(mc_info->head)
     {
         if(mc_info->head == mc_info->head->next)
@@ -1556,6 +1557,22 @@ static inline void taichi_test(struct ssd *ssd, int flag)
     }
 
     assert(mc_info->cur_size <= ckm_info->page_map_cnt);
+#else
+    if(flag == 0)
+        printf("before del:\n");
+    else
+        printf("after del:\n");
+    tmp = mc_info->head;
+    if(tmp)
+        printf("head: %lu, tail: %lu, size: %d\n%lu", mc_info->head->tvpn, mc_info->tail->tvpn,tmp->entry_cnt[0]+tmp->entry_cnt[1], tmp->tvpn);
+    tmp = tmp->next;
+    while(tmp)
+    {
+        printf("->%lu", tmp->tvpn);
+        tmp = tmp->next;
+    }
+    printf("\n");
+#endif
 }
 
 uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t stime)
@@ -1605,7 +1622,7 @@ uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t 
                 int res = dftl_look_up(ssd, start_lpn+i);
                 if(res == 1)
                 {
-                    dftl_set_dirty(ssd, start_lpn+i);
+                    dftl_set_dirty(ssd->mc_info, start_lpn+i);
                 }
                 else
                     lat = taichi_add2_pagemap(ssd, start_lpn+i, stime, WRITE, res);
@@ -1613,7 +1630,7 @@ uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t 
             }
             maxlat = maxlat > lat ? maxlat : lat;
         }
-        assert((cur_size - update_size) == ckm_info->chunk_page_cnt[victim->lcn]);
+        //assert((cur_size - update_size) == ckm_info->chunk_page_cnt[victim->lcn]);
     }
     else                                                     //new page and update page => chunk map
     {
@@ -1649,7 +1666,9 @@ uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t 
                 if(victim->bitmap[i] == 1)                  //page map->chunk map(update)
                 {
                     //printf("delete page:%lu from page map\n", start_lpn+i);
+                    //taichi_test(ssd, 0);
                     taichi_del_from_pagemap(ssd, start_lpn+i);
+                    //taichi_test(ssd, 1);
                     ckm_info->bitmap[start_lpn+i] = 1;
                     ckm_info->chunk_page_cnt[victim->lcn]++;
 
@@ -1673,14 +1692,14 @@ uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t 
             maxlat = maxlat > lat ? maxlat : lat;
             //taichi_test(ssd, flag);
         }
-        assert(write_size == ckm_info->chunk_page_cnt[victim->lcn]);
+        //assert(write_size == ckm_info->chunk_page_cnt[victim->lcn]);
     }
 
     //if((ckm_info->page_map_cnt + ckm_info->chunk_map_cnt + ckm_info->update_cnt) % 100000 == 0 )
         //printf("taichi chunk map rate: %.5f, chunk: %lu, page: %lu, update: %lu\n", (double)ckm_info->chunk_map_cnt/(ckm_info->page_map_cnt + ckm_info->chunk_map_cnt), 
             //ckm_info->chunk_map_cnt, ckm_info->page_map_cnt, ckm_info->update_cnt);
 
-    taichi_test(ssd, 0);
+    //taichi_test(ssd, 0);
     return maxlat;
 }
 
@@ -2163,11 +2182,13 @@ uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int
             printf("avg write delay: %lu\n", ssd->cb_info->wdelay/ssd->cb_info->wcnt);
             ssd->cb_info->wdelay = 0;
             ssd->cb_info->wcnt = 0;
+            printf("wmiss: %lu, whit: %lu, wb: %lu, cb_size: %d\n", ssd->cb_info->wbuffer_miss, ssd->cb_info->wbuffer_hit, ssd->cb_info->wb_page, ssd->cb_info->cur_size);
+#ifdef DFTL
             struct chunk_map_info *ckm_info = ssd->mc_info->ckm_info;
             double chunk_map_rate = (double)(ckm_info->chunk_map_cnt)/(ckm_info->page_map_cnt + ckm_info->chunk_map_cnt);
-            printf("wmiss: %lu, whit: %lu, wb: %lu, cb_size: %d\n", ssd->cb_info->wbuffer_miss, ssd->cb_info->wbuffer_hit, ssd->cb_info->wb_page, ssd->cb_info->cur_size);
             printf("taichi chunk map rate: %.5f, chunk: %lu, page: %lu, update: %lu\n", chunk_map_rate, ckm_info->chunk_map_cnt, ckm_info->page_map_cnt, ckm_info->update_cnt);
             printf("mapping cache size: %d\n\n", ssd->mc_info->cur_size);
+#endif
         }
     }
     else if(op == READ)
