@@ -1025,7 +1025,7 @@ struct map_entry_node *dftl_lookup_hashmap(struct mapping_cache_info *mc_info, u
             return tmp;
         }
 
-        tmp = tmp->next;
+        tmp = tmp->hashnext;
     }
 
     return tmp;
@@ -1285,6 +1285,7 @@ int64_t dftl_translate(struct ssd* ssd, uint64_t lpn, int op, int64_t stime)
     res = dftl_look_up(ssd, lpn);
     if(res <= 0)
     {
+        assert(res == -1);
         while(mc_info->cur_size + add_size > mc_info->max_size)
         {
             victim = mc_info->tail;
@@ -1307,6 +1308,17 @@ int64_t dftl_translate(struct ssd* ssd, uint64_t lpn, int op, int64_t stime)
             maxlat = dftl_load_entry(ssd, ppa, stime, maxlat);
 
         dftl_lru_add_new_node(ssd->mc_info, lpn, res);
+        if(op == READ)
+        {
+            mc_info->dftl_rmiss++;
+        }
+    }
+    else
+    {
+        if(op == READ)
+        {
+            mc_info->dftl_rhit++;
+        }
     }
     if(op == WRITE)
         dftl_set_dirty(ssd->mc_info, lpn);                     //op => setdirty
@@ -1660,8 +1672,8 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
         ssd->cb_info->rbuffer_miss++;
         ppa = get_maptbl_ent(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
-            if(!mapped_ppa(&ppa))
-                printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
+            //if(!mapped_ppa(&ppa))
+                //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
             //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n", 
             //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
             //continue;
@@ -1670,14 +1682,23 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
         uint64_t dftl_delay = 0;
 #ifdef DFTL
         dftl_delay = dftl_translate(ssd, lpn, READ, stime);
-        if(dftl_delay == 0)
+        /*if(dftl_delay == 0)
             ssd->mc_info->dftl_rhit++;
         else
-            ssd->mc_info->dftl_rmiss++;
+            ssd->mc_info->dftl_rmiss++;*/
+        //if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) <= 50)
+            //printf("read: %lu\n", lpn);
 
-        //if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) % 10000 == 0)
-            //printf("dftl rhit rate: %.5f, hit: %lu, miss: %lu\n", (double)ssd->mc_info->dftl_rhit/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit), 
-            //ssd->mc_info->dftl_rhit, ssd->mc_info->dftl_rmiss);
+        if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) % 1000000 == 0)
+        { 
+            printf("dftl rhit rate: %.5f, hit: %lu, miss: %lu\n", (double)(ssd->mc_info->dftl_rhit)/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit), 
+            ssd->mc_info->dftl_rhit, ssd->mc_info->dftl_rmiss);
+            ssd->mc_info->dftl_rhit = 0;
+            ssd->mc_info->dftl_rmiss = 0;
+            printf("dftl size: %d(%d)\n", ssd->mc_info->cur_size/ENTRY_PER_PAGE, ssd->mc_info->cur_size);
+            if(ssd->mc_info->head)
+                printf("head: %lu, tail: %lu\n", ssd->mc_info->head->tvpn, ssd->mc_info->tail->tvpn);
+        }
 
         //stime += dftl_delay;
 #endif
@@ -1814,6 +1835,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
 #if 1
             sublat = ssd_buffer_read(ssd, lpn, req->stime);
+            printf("origin-read: %lu, lpn: %lu, read size:%d\n", req->slba, lpn, req->nlb);
 #else
             ppa = get_maptbl_ent(ssd, lpn);
             if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
