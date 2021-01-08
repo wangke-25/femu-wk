@@ -400,7 +400,7 @@ static void ssd_init_gtd(struct ssd *ssd)
         ssd->gtd[i].ppa = UNMAPPED_PPA;
     }*/
     ssd->gtd = g_malloc0(sizeof(struct ppa) * (spp->tt_pgs / (ENTRY_PER_PAGE/2)) + 1);
-    for (i = 0; i < (spp->tt_pgs / (ENTRY_PER_PAGE/2)); i++) {
+    for (i = 0; i < (spp->tt_pgs / (ENTRY_PER_PAGE/2) + 1); i++) {
         ssd->gtd[i].ppa = UNMAPPED_PPA;
     }
 }
@@ -463,7 +463,7 @@ void ssd_init(FemuCtrl *n)
     /* initialize write pointer, this is how we allocate new pages for writes */
     ssd_init_write_pointer(ssd, DATA_PAGE);
 
-#if TRANS
+#ifdef DFTL
     /* init trans write pointer */
     ssd_init_write_pointer(ssd, TRANS_PAGE);
 #endif
@@ -1197,6 +1197,7 @@ int dftl_lru_add_new_node(struct mapping_cache_info *mc_info, uint64_t lpn, int 
         else
             new_node->entry_cnt[1]++;
         new_node->tvpn = tvpn;
+        new_node->bitmap[offset] = 1;
 
         if(mc_info->head == NULL)
         {
@@ -1220,6 +1221,7 @@ int dftl_lru_add_new_node(struct mapping_cache_info *mc_info, uint64_t lpn, int 
     else if(res == 0)
     {
         struct map_entry_node *tmp = mc_info->head;
+        assert(tvpn == tmp->tvpn);
         tmp->bitmap[offset] = 1;
         if(offset < ENTRY_PER_PAGE/2)
             tmp->entry_cnt[0]++;
@@ -1480,7 +1482,8 @@ void taichi_del_from_pagemap(struct ssd *ssd, uint64_t lpn)
                 printf("error in taichi_del_from_pagemap2!\n");
         }
     }
-    
+    //else
+        //printf("not find page: %lu\n", lpn);
 }
 
 uint64_t taichi_trans_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
@@ -1518,6 +1521,41 @@ uint64_t taichi_trans_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
     }
 
     return lat;
+}
+
+static inline void taichi_test(struct ssd *ssd, int flag)
+{
+    struct mapping_cache_info *mc_info = ssd->mc_info;
+    struct chunk_map_info *ckm_info = mc_info->ckm_info;
+    struct map_entry_node *tmp = NULL;
+
+    if(mc_info->head)
+    {
+        if(mc_info->head == mc_info->head->next)
+            printf("flag = %d, head: %lu\n", flag, mc_info->head->tvpn);
+    }
+
+    if(mc_info->cur_size > ckm_info->page_map_cnt)
+    {
+        if(flag != 0)
+            printf("flag = %d\n", flag);
+        printf("errorrrrrrr!!!!  cursize: %d, page_map_cnt: %d\n", mc_info->cur_size, ckm_info->page_map_cnt);
+        if(mc_info->head && mc_info->tail)
+            printf("head:%lu, tail:%lu\n", mc_info->head->tvpn, mc_info->tail->tvpn);
+        int cnt = 0;
+        tmp = mc_info->head;
+        while(tmp != NULL)
+        {
+            printf("%lu->", tmp->tvpn);
+            cnt += (tmp->entry_cnt[0] + tmp->entry_cnt[1]);
+            tmp = tmp->next;
+        }
+        printf("\nerrorrrrrrr!!!!  cnt: %d\n", cnt);
+
+        assert(mc_info->cur_size == cnt);
+    }
+
+    assert(mc_info->cur_size <= ckm_info->page_map_cnt);
 }
 
 uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t stime)
@@ -1575,9 +1613,11 @@ uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t 
             }
             maxlat = maxlat > lat ? maxlat : lat;
         }
+        assert((cur_size - update_size) == ckm_info->chunk_page_cnt[victim->lcn]);
     }
     else                                                     //new page and update page => chunk map
     {
+        int flag = 0;
         for(i = 0; i < PAGES_PER_CHUNK; i++)
         {
             lat = 0;
@@ -1596,16 +1636,19 @@ uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t 
 
                     ckm_info->chunk_map_cnt--;
                     ckm_info->page_map_cnt++;
+                    flag = 1;
                 }
                 else                                        //chunk map->chunk map(update)
                 {
                     ckm_info->update_cnt++;
+                    flag = 2;
                 }
             }
             else if(ckm_info->bitmap[start_lpn+i] == 0)
             {
                 if(victim->bitmap[i] == 1)                  //page map->chunk map(update)
                 {
+                    //printf("delete page:%lu from page map\n", start_lpn+i);
                     taichi_del_from_pagemap(ssd, start_lpn+i);
                     ckm_info->bitmap[start_lpn+i] = 1;
                     ckm_info->chunk_page_cnt[victim->lcn]++;
@@ -1613,6 +1656,7 @@ uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t 
                     ckm_info->chunk_map_cnt++;
                     ckm_info->page_map_cnt--;
                     ckm_info->update_cnt++;
+                    flag = 3;
                 }
             }
             else if(ckm_info->bitmap[start_lpn+i] == -1)    //null->chunk map
@@ -1623,16 +1667,20 @@ uint64_t taichi_trans_write(struct ssd *ssd, struct chunk_node *victim, int64_t 
                     ckm_info->chunk_page_cnt[victim->lcn]++;
 
                     ckm_info->chunk_map_cnt++;
+                    flag = 4;
                 }
             }
             maxlat = maxlat > lat ? maxlat : lat;
+            //taichi_test(ssd, flag);
         }
+        assert(write_size == ckm_info->chunk_page_cnt[victim->lcn]);
     }
 
     //if((ckm_info->page_map_cnt + ckm_info->chunk_map_cnt + ckm_info->update_cnt) % 100000 == 0 )
         //printf("taichi chunk map rate: %.5f, chunk: %lu, page: %lu, update: %lu\n", (double)ckm_info->chunk_map_cnt/(ckm_info->page_map_cnt + ckm_info->chunk_map_cnt), 
             //ckm_info->chunk_map_cnt, ckm_info->page_map_cnt, ckm_info->update_cnt);
 
+    taichi_test(ssd, 0);
     return maxlat;
 }
 
@@ -1666,6 +1714,13 @@ int init_chunkbuffer(struct ssd *ssd)
     cb_info->wbuffer_hit = 0;
     cb_info->rbuffer_miss = 0;
     cb_info->wbuffer_miss = 0;
+
+    cb_info->wb_page = 0;
+
+    cb_info->rdelay = 0;
+    cb_info->wdelay = 0;
+    cb_info->rcnt = 0;
+    cb_info->wcnt = 0;
 
     cb_info->hashmap = (struct chunk_node **)malloc(sizeof(struct chunk_node *) * HASH_MAP_SIZE);
     assert(cb_info->hashmap);
@@ -1964,6 +2019,8 @@ uint64_t write_back_chunk(struct ssd *ssd, struct chunk_node *victim, int64_t st
         //dftl_translate(ssd, lpn, WRITE, stime);
 //#endif
     }
+
+    ssd->cb_info->wb_page += victim->size;
 #ifdef DFTL
     taichi_translate(ssd, 0, victim, WRITE, stime);
 #endif
@@ -1994,8 +2051,8 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
         ssd->cb_info->rbuffer_miss++;
         ppa = get_maptbl_ent(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
-            if(!mapped_ppa(&ppa))
-                printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
+            //if(!mapped_ppa(&ppa))
+                //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
             //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n", 
             //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
             //continue;
@@ -2006,17 +2063,17 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
         dftl_delay = taichi_translate(ssd, lpn, NULL, READ, stime);
         ssd->mc_info->r_delay += dftl_delay;
         
-        /*if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) % 100000 == 0)
+        if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) % 1000000 == 0)
         {
-            double avg_delay = (double)ssd->mc_info->r_delay/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit);
+            double avg_delay = (double)(ssd->mc_info->r_delay)/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit);
+            double hitrate = (double)(ssd->mc_info->dftl_rhit)/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit);
 
-            printf("dftl rhit rate: %.5f, hit: %lu, miss: %lu, avg_delay: %.5f\n", (double)ssd->mc_info->dftl_rhit/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit), 
-            ssd->mc_info->dftl_rhit, ssd->mc_info->dftl_rmiss, avg_delay);
+            printf("dftl rhit rate: %.5f, hit: %lu, miss: %lu, avg_delay: %.5f\n", hitrate, ssd->mc_info->dftl_rhit, ssd->mc_info->dftl_rmiss, avg_delay);
             
             ssd->mc_info->r_delay = 0;
             ssd->mc_info->dftl_rhit = 0;
             ssd->mc_info->dftl_rmiss = 0;
-        }*/
+        }
 
         //stime += dftl_delay;
 #endif
@@ -2026,11 +2083,22 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
         srd.stime = stime;
         sublat = ssd_advance_status_delay(ssd, &ppa, &srd, dftl_delay);
 
+        /*ssd->cb_info->rdelay += sublat;
+        ssd->cb_info->rcnt++;
+        if(ssd->cb_info->rcnt % 1000000 == 0)
+        {
+            printf("avg read delay: %lu\n", ssd->cb_info->rdelay/ssd->cb_info->rcnt);
+            ssd->cb_info->rdelay = 0;
+            ssd->cb_info->rcnt = 0;
+        }*/
         //if(dftl_delay != 0)
             //printf("read lat: %lu, lpn: %lu\n", sublat, lpn);
     }
-    //if((ssd->cb_info->rbuffer_hit + ssd->cb_info->rbuffer_miss) % 10000 == 0)
-        //printf("rbuffer hit:%lu, rbuffer miss: %lu\n", ssd->cb_info->rbuffer_hit, ssd->cb_info->rbuffer_miss);
+    /*if((ssd->cb_info->rbuffer_hit + ssd->cb_info->rbuffer_miss) % 1000000 == 0)
+    {
+        double hitrate= (double)(ssd->cb_info->rbuffer_hit)/(ssd->cb_info->rbuffer_hit + ssd->cb_info->rbuffer_miss);
+        printf("chunkbuffer rhit rate: %.5f, rbuffer hit:%lu, rbuffer miss: %lu\n", hitrate, ssd->cb_info->rbuffer_hit, ssd->cb_info->rbuffer_miss);
+    }*/
     return sublat;
 }
 
@@ -2078,6 +2146,48 @@ uint64_t ssd_buffer_write(struct ssd *ssd, uint64_t lpn, int64_t stime)
     }
 
     return maxlat;
+}
+
+/**wk**/
+uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int op)
+{
+    uint64_t lat = 0;
+    if(op == WRITE)
+    {
+        lat = ssd_buffer_write(ssd, lpn, stime);
+        
+        ssd->cb_info->wdelay += lat;
+        ssd->cb_info->wcnt++;
+        if(ssd->cb_info->wcnt % 100000 == 0)
+        {
+            printf("avg write delay: %lu\n", ssd->cb_info->wdelay/ssd->cb_info->wcnt);
+            ssd->cb_info->wdelay = 0;
+            ssd->cb_info->wcnt = 0;
+            struct chunk_map_info *ckm_info = ssd->mc_info->ckm_info;
+            double chunk_map_rate = (double)(ckm_info->chunk_map_cnt)/(ckm_info->page_map_cnt + ckm_info->chunk_map_cnt);
+            printf("wmiss: %lu, whit: %lu, wb: %lu, cb_size: %d\n", ssd->cb_info->wbuffer_miss, ssd->cb_info->wbuffer_hit, ssd->cb_info->wb_page, ssd->cb_info->cur_size);
+            printf("taichi chunk map rate: %.5f, chunk: %lu, page: %lu, update: %lu\n", chunk_map_rate, ckm_info->chunk_map_cnt, ckm_info->page_map_cnt, ckm_info->update_cnt);
+            printf("mapping cache size: %d\n\n", ssd->mc_info->cur_size);
+        }
+    }
+    else if(op == READ)
+    {
+        lat = ssd_buffer_read(ssd, lpn, stime);
+        
+        ssd->cb_info->rdelay += lat;
+        ssd->cb_info->rcnt++;
+        if(ssd->cb_info->rcnt % 1000000 == 0)
+        {
+            printf("avg read delay: %lu\n", ssd->cb_info->rdelay/ssd->cb_info->rcnt);
+            ssd->cb_info->rdelay = 0;
+            ssd->cb_info->rcnt = 0;
+            //struct chunk_map_info *ckm_info = ssd->mc_info->ckm_info;
+            //double chunk_map_rate = (double)(ckm_info->chunk_map_cnt)/(ckm_info->page_map_cnt + ckm_info->chunk_map_cnt);
+            //printf("taichi chunk map rate: %.5f, chunk: %lu, page: %lu, update: %lu\n", chunk_map_rate, ckm_info->chunk_map_cnt, ckm_info->page_map_cnt, ckm_info->update_cnt);
+        }
+    }
+    
+    return lat;
 }
 
 /* accept NVMe cmd as input, in order to support more command types in future */
@@ -2155,7 +2265,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         /* normal IO read path */
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
 #if 1
-            sublat = ssd_buffer_read(ssd, lpn, req->stime);
+            sublat = ssd_buffer_management(ssd, lpn, req->stime, READ);
 #else
             ppa = get_maptbl_ent(ssd, lpn);
             if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
@@ -2212,7 +2322,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     // are we doing fresh writes ? maptbl[lpn] == FREE, pick a new page
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
 #if 1        
-        curlat = ssd_buffer_write(ssd, lpn, req->stime);
+        curlat = ssd_buffer_management(ssd, lpn, req->stime, WRITE);
         //ssd_buffer_write(ssd, lpn, req->stime);
 #else      
         ppa = get_maptbl_ent(ssd, lpn);
