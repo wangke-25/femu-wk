@@ -999,6 +999,8 @@ int init_dftl(struct ssd *ssd)
     mc_info->dftl_whit = 0;
     mc_info->dftl_wmiss = 0;
 
+    mc_info->r_delay = 0;
+
     mc_info->hashmap = (struct map_entry_node **)malloc(sizeof(struct map_entry_node *) * DFTL_HASH_MAP_SIZE);
     assert(mc_info->hashmap);
 
@@ -1348,6 +1350,11 @@ int init_chunkbuffer(struct ssd *ssd)
     cb_info->rbuffer_miss = 0;
     cb_info->wbuffer_miss = 0;
 
+    cb_info->r_delay = 0;
+    cb_info->w_delay = 0;
+    cb_info->r_cnt = 0;
+    cb_info->w_cnt = 0;
+
     cb_info->hashmap = (struct chunk_node **)malloc(sizeof(struct chunk_node *) * HASH_MAP_SIZE);
     assert(cb_info->hashmap);
 
@@ -1682,6 +1689,8 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
         uint64_t dftl_delay = 0;
 #ifdef DFTL
         dftl_delay = dftl_translate(ssd, lpn, READ, stime);
+
+        ssd->mc_info->r_delay += dftl_delay;
         /*if(dftl_delay == 0)
             ssd->mc_info->dftl_rhit++;
         else
@@ -1690,14 +1699,18 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
             //printf("read: %lu\n", lpn);
 
         if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) % 1000000 == 0)
-        { 
+        {
             printf("dftl rhit rate: %.5f, hit: %lu, miss: %lu\n", (double)(ssd->mc_info->dftl_rhit)/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit), 
             ssd->mc_info->dftl_rhit, ssd->mc_info->dftl_rmiss);
             ssd->mc_info->dftl_rhit = 0;
             ssd->mc_info->dftl_rmiss = 0;
-            printf("dftl size: %d(%d)\n", ssd->mc_info->cur_size/ENTRY_PER_PAGE, ssd->mc_info->cur_size);
-            if(ssd->mc_info->head)
-                printf("head: %lu, tail: %lu\n", ssd->mc_info->head->tvpn, ssd->mc_info->tail->tvpn);
+            //unsigned long avg_rdelay = ssd->mc_info->r_delay/(ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss);
+            //printf("dftl avg rdelay: %lu\n", avg_rdelay);
+            //ssd->mc_info->r_delay = 0;
+
+            //printf("dftl size: %d(%d)\n", ssd->mc_info->cur_size/ENTRY_PER_PAGE, ssd->mc_info->cur_size);
+            //if(ssd->mc_info->head)
+                //rintf("head: %lu, tail: %lu\n", ssd->mc_info->head->tvpn, ssd->mc_info->tail->tvpn);
         }
 
         //stime += dftl_delay;
@@ -1759,6 +1772,26 @@ uint64_t ssd_buffer_write(struct ssd *ssd, uint64_t lpn, int64_t stime)
     return maxlat;
 }
 
+
+uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int op)
+{
+    int lat = 0;
+    if(op == WRITE)
+    {
+        lat = ssd_buffer_write(ssd, lpn, stime);
+        ssd->cb_info->w_cnt++;
+        ssd->cb_info->w_delay += lat;
+        
+    }
+    else if(op == READ)
+    {
+        lat = ssd_buffer_read(ssd, lpn, stime);
+        ssd->cb_info->r_cnt++;
+        ssd->cb_info->r_delay += lat;
+    }
+    return lat;
+}
+
 /* accept NVMe cmd as input, in order to support more command types in future */
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
@@ -1772,13 +1805,17 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     int nsecs = req->nlb;
     struct ppa ppa;
     uint64_t start_lpn = lba / spp->secs_per_pg;
-    uint64_t end_lpn = (lba + nsecs) / spp->secs_per_pg;
+    uint64_t end_lpn = (lba + nsecs - 1) / spp->secs_per_pg;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
     //struct ssd_channel *ch;
     struct nand_lun *lun;
     bool in_gc = false; /* indicate whether any subIO met GC */
 
+    if(nsecs == 0 || start_lpn > end_lpn)
+    {
+        return 0;
+    }
     if (end_lpn >= spp->tt_pgs) {
         printf("RD-ERRRRRRRRRR,start_lpn=%"PRIu64",end_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, end_lpn, ssd->sp.tt_pgs);
     }
@@ -1835,7 +1872,6 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
 #if 1
             sublat = ssd_buffer_read(ssd, lpn, req->stime);
-            printf("origin-read: %lu, lpn: %lu, read size:%d\n", req->slba, lpn, req->nlb);
 #else
             ppa = get_maptbl_ent(ssd, lpn);
             if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {

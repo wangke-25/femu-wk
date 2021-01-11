@@ -33,6 +33,11 @@ struct chunk_buffer_info {
     unsigned long wbuffer_hit;
     unsigned long rbuffer_miss;
     unsigned long wbuffer_miss;
+
+    unsigned long r_delay;
+    unsigned long w_delay;
+    unsigned long r_cnt;
+    unsigned long w_cnt;
 };
 
 #endif

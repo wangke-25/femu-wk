@@ -40,6 +40,8 @@ struct mapping_cache_info {
     unsigned long dftl_rmiss;
     unsigned long dftl_whit;
     unsigned long dftl_wmiss;
+
+    unsigned long r_delay;
 };
 
 #endif
