@@ -2177,7 +2177,7 @@ uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int
         
         ssd->cb_info->wdelay += lat;
         ssd->cb_info->wcnt++;
-        if(ssd->cb_info->wcnt % 100000 == 0)
+        if(ssd->cb_info->wcnt % 1000000 == 0)
         {
             printf("avg write delay: %lu\n", ssd->cb_info->wdelay/ssd->cb_info->wcnt);
             ssd->cb_info->wdelay = 0;
@@ -2224,13 +2224,17 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     int nsecs = req->nlb;
     struct ppa ppa;
     uint64_t start_lpn = lba / spp->secs_per_pg;
-    uint64_t end_lpn = (lba + nsecs) / spp->secs_per_pg;
+    uint64_t end_lpn = (lba + nsecs - 1) / spp->secs_per_pg;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
     //struct ssd_channel *ch;
     struct nand_lun *lun;
     bool in_gc = false; /* indicate whether any subIO met GC */
 
+    if(nsecs == 0 || start_lpn > end_lpn)
+    {
+        return 0;
+    }
     if (end_lpn >= spp->tt_pgs) {
         printf("RD-ERRRRRRRRRR,start_lpn=%"PRIu64",end_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, end_lpn, ssd->sp.tt_pgs);
     }
