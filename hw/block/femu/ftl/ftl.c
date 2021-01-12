@@ -185,9 +185,15 @@ static void ssd_advance_write_pointer(struct ssd *ssd, int type)
     struct write_pointer *wpp;
     struct line_mgmt *lm = &ssd->lm;
     if(type == DATA_PAGE)
+    {
         wpp = &ssd->wp;
+        ssd->cb_info->nand_w_cnt++;
+    }
     else if(type == TRANS_PAGE)
+    {
         wpp = &ssd->trans_wp;
+        ssd->cb_info->nand_wt_cnt++;
+    }
 
     check_addr(wpp->ch, spp->nchs);
     wpp->ch++;
@@ -1355,6 +1361,9 @@ int init_chunkbuffer(struct ssd *ssd)
     cb_info->r_cnt = 0;
     cb_info->w_cnt = 0;
 
+    cb_info->nand_w_cnt = 0;
+    cb_info->nand_wt_cnt = 0;
+
     cb_info->hashmap = (struct chunk_node **)malloc(sizeof(struct chunk_node *) * HASH_MAP_SIZE);
     assert(cb_info->hashmap);
 
@@ -1700,13 +1709,13 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
 
         if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) % 1000000 == 0)
         {
+            unsigned long avg_rdelay = ssd->mc_info->r_delay/(ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss);
+            printf("dftl avg rdelay: %lu\n", avg_rdelay);
+            ssd->mc_info->r_delay = 0;
             printf("dftl rhit rate: %.5f, hit: %lu, miss: %lu\n", (double)(ssd->mc_info->dftl_rhit)/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit), 
             ssd->mc_info->dftl_rhit, ssd->mc_info->dftl_rmiss);
             ssd->mc_info->dftl_rhit = 0;
             ssd->mc_info->dftl_rmiss = 0;
-            //unsigned long avg_rdelay = ssd->mc_info->r_delay/(ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss);
-            //printf("dftl avg rdelay: %lu\n", avg_rdelay);
-            //ssd->mc_info->r_delay = 0;
 
             //printf("dftl size: %d(%d)\n", ssd->mc_info->cur_size/ENTRY_PER_PAGE, ssd->mc_info->cur_size);
             //if(ssd->mc_info->head)
@@ -1782,12 +1791,27 @@ uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int
         ssd->cb_info->w_cnt++;
         ssd->cb_info->w_delay += lat;
         
+        if(ssd->cb_info->w_cnt % 1000000 == 0)
+        {
+            printf("write delay: %lu\n", ssd->cb_info->w_delay/ssd->cb_info->w_cnt);
+            ssd->cb_info->w_cnt = 0;
+            ssd->cb_info->w_delay = 0;
+
+            printf("cb_whit: %lu, cb_wmiss: %lu, nand_w: %lu, nand_wt: %lu\n", ssd->cb_info->wbuffer_hit, ssd->cb_info->wbuffer_miss, ssd->cb_info->nand_w_cnt, ssd->cb_info->nand_wt_cnt);
+        }
     }
     else if(op == READ)
     {
         lat = ssd_buffer_read(ssd, lpn, stime);
         ssd->cb_info->r_cnt++;
         ssd->cb_info->r_delay += lat;
+        if(ssd->cb_info->r_cnt % 1000000 == 0)
+        {
+            printf("read delay: %lu\n", ssd->cb_info->r_delay/ssd->cb_info->r_cnt);
+            ssd->cb_info->r_cnt = 0;
+            ssd->cb_info->r_delay = 0;
+        }
+        //lat = 80000;
     }
     return lat;
 }
@@ -1871,7 +1895,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         /* normal IO read path */
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
 #if 1
-            sublat = ssd_buffer_read(ssd, lpn, req->stime);
+            sublat = ssd_buffer_management(ssd, lpn, req->stime, READ);
 #else
             ppa = get_maptbl_ent(ssd, lpn);
             if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
@@ -1928,7 +1952,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     // are we doing fresh writes ? maptbl[lpn] == FREE, pick a new page
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
 #if 1        
-        curlat = ssd_buffer_write(ssd, lpn, req->stime);
+        curlat = ssd_buffer_management(ssd, lpn, req->stime, WRITE);
         //ssd_buffer_write(ssd, lpn, req->stime);
 #else      
         ppa = get_maptbl_ent(ssd, lpn);
