@@ -1748,11 +1748,11 @@ uint64_t ssd_buffer_write(struct ssd *ssd, uint64_t lpn, int64_t stime)
     res = lru_lookup(ssd, lpn);
     if(res == 1) {
         ssd->cb_info->wbuffer_hit++;
-        sublat = BUFFER_HIT_LAT;
+        maxlat = BUFFER_HIT_LAT;
     }
     else {
         ssd->cb_info->wbuffer_miss++;
-        sublat = BUFFER_HIT_LAT;
+        maxlat = BUFFER_HIT_LAT;
         while(cb_info->cur_size + add_size > cb_info->max_size) {
             victim = cb_info->tail;
 
@@ -1788,30 +1788,30 @@ uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int
     if(op == WRITE)
     {
         lat = ssd_buffer_write(ssd, lpn, stime);
-        ssd->cb_info->w_cnt++;
+        /*ssd->cb_info->w_cnt++;
         ssd->cb_info->w_delay += lat;
         
-        if(ssd->cb_info->w_cnt % 100000 == 0)
+        if(ssd->cb_info->w_cnt % 100 == 0)
         {
             printf("write delay: %lu\n", ssd->cb_info->w_delay/ssd->cb_info->w_cnt);
             ssd->cb_info->w_cnt = 0;
             ssd->cb_info->w_delay = 0;
 
-            printf("cb_whit: %lu, cb_wmiss: %lu, nand_w: %lu, nand_wt: %lu", ssd->cb_info->wbuffer_hit, ssd->cb_info->wbuffer_miss, ssd->cb_info->nand_w_cnt, ssd->cb_info->nand_wt_cnt);
-            printf(", wa: %.5f\n", (double)(ssd->cb_info->nand_w_cnt+ssd->cb_info->nand_wt_cnt)/(ssd->cb_info->wbuffer_miss+ssd->cb_info->wbuffer_hit));
-        }
+            //printf("cb_whit: %lu, cb_wmiss: %lu, nand_w: %lu, nand_wt: %lu", ssd->cb_info->wbuffer_hit, ssd->cb_info->wbuffer_miss, ssd->cb_info->nand_w_cnt, ssd->cb_info->nand_wt_cnt);
+            //printf(", wa: %.5f\n", (double)(ssd->cb_info->nand_w_cnt+ssd->cb_info->nand_wt_cnt)/(ssd->cb_info->wbuffer_miss+ssd->cb_info->wbuffer_hit));
+        }*/
     }
     else if(op == READ)
     {
         lat = ssd_buffer_read(ssd, lpn, stime);
-        ssd->cb_info->r_cnt++;
+        /*ssd->cb_info->r_cnt++;
         ssd->cb_info->r_delay += lat;
         if(ssd->cb_info->r_cnt % 1000000 == 0)
         {
             printf("read delay: %lu\n", ssd->cb_info->r_delay/ssd->cb_info->r_cnt);
             ssd->cb_info->r_cnt = 0;
             ssd->cb_info->r_delay = 0;
-        }
+        }*/
         //lat = 80000;
     }
     return lat;
@@ -1916,6 +1916,14 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         /* this is the latency taken by this read request */
         //req->expire_time = maxlat;
         //printf("Coperd,%s,rd,lba:%lu,lat:%lu\n", ssd->ssdname, req->slba, maxlat);
+        ssd->cb_info->r_cnt++;
+        ssd->cb_info->r_delay += maxlat;
+        if(ssd->cb_info->r_cnt % 1000000 == 0)
+        {
+            printf("read delay: %lu\n", ssd->cb_info->r_delay/ssd->cb_info->r_cnt);
+            ssd->cb_info->r_cnt = 0;
+            ssd->cb_info->r_delay = 0;
+        }
         return maxlat;
     }
 }
@@ -1988,6 +1996,18 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         curlat = ssd_advance_status(ssd, &ppa, &swr);
 #endif
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+    }
+
+    ssd->cb_info->w_cnt++;
+    ssd->cb_info->w_delay += maxlat;
+    if(ssd->cb_info->w_cnt % 10000 == 0)
+    {
+        printf("write delay: %lu\n", ssd->cb_info->w_delay/ssd->cb_info->w_cnt);
+        ssd->cb_info->w_cnt = 0;
+        ssd->cb_info->w_delay = 0;
+
+        //printf("cb_whit: %lu, cb_wmiss: %lu, nand_w: %lu, nand_wt: %lu", ssd->cb_info->wbuffer_hit, ssd->cb_info->wbuffer_miss, ssd->cb_info->nand_w_cnt, ssd->cb_info->nand_wt_cnt);
+        //printf(", wa: %.5f\n", (double)(ssd->cb_info->nand_w_cnt+ssd->cb_info->nand_wt_cnt)/(ssd->cb_info->wbuffer_miss+ssd->cb_info->wbuffer_hit));
     }
 
     return maxlat;
