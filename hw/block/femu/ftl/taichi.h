@@ -4,8 +4,8 @@
 #define M 32
 #define N 32
 #define ENTRY_PER_PAGE 1024             // M*N
-#define MAX_MAPPING_CAHCHE_SIZE (1024 * ENTRY_PER_PAGE)
-#define DFTL_HASH_MAP_SIZE 2048         //1024*2
+#define MAX_MAPPING_CAHCHE_SIZE (256 * ENTRY_PER_PAGE)
+#define DFTL_HASH_MAP_SIZE (512 * ENTRY_PER_PAGE)         //1024*2
 #define DFTL_NODE_ADD_SIZE 1
 
 #define WRITE 0
@@ -51,6 +51,8 @@ struct mapping_cache_info {
     unsigned long dftl_rmiss;
     unsigned long dftl_whit;
     unsigned long dftl_wmiss;
+
+    unsigned long r_delay;
 
     struct chunk_map_info *ckm_info;
 };
