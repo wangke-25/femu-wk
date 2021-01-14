@@ -2134,11 +2134,11 @@ uint64_t ssd_buffer_write(struct ssd *ssd, uint64_t lpn, int64_t stime)
     res = lru_lookup(ssd, lpn);
     if(res == 1) {
         ssd->cb_info->wbuffer_hit++;
-        sublat = BUFFER_HIT_LAT;
+        maxlat = BUFFER_HIT_LAT;
     }
     else {
         ssd->cb_info->wbuffer_miss++;
-        sublat = BUFFER_HIT_LAT;
+        maxlat = BUFFER_HIT_LAT;
         while(cb_info->cur_size + add_size > cb_info->max_size) {
             victim = cb_info->tail;
 
@@ -2175,7 +2175,7 @@ uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int
     {
         lat = ssd_buffer_write(ssd, lpn, stime);
         
-        ssd->cb_info->wdelay += lat;
+        /*ssd->cb_info->wdelay += lat;
         ssd->cb_info->wcnt++;
         if(ssd->cb_info->wcnt % 1000000 == 0)
         {
@@ -2189,13 +2189,13 @@ uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int
             printf("taichi chunk map rate: %.5f, chunk: %lu, page: %lu, update: %lu\n", chunk_map_rate, ckm_info->chunk_map_cnt, ckm_info->page_map_cnt, ckm_info->update_cnt);
             printf("mapping cache size: %d\n\n", ssd->mc_info->cur_size);
 #endif
-        }
+        }*/
     }
     else if(op == READ)
     {
         lat = ssd_buffer_read(ssd, lpn, stime);
         
-        ssd->cb_info->rdelay += lat;
+        /*ssd->cb_info->rdelay += lat;
         ssd->cb_info->rcnt++;
         if(ssd->cb_info->rcnt % 1000000 == 0)
         {
@@ -2205,7 +2205,7 @@ uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int
             //struct chunk_map_info *ckm_info = ssd->mc_info->ckm_info;
             //double chunk_map_rate = (double)(ckm_info->chunk_map_cnt)/(ckm_info->page_map_cnt + ckm_info->chunk_map_cnt);
             //printf("taichi chunk map rate: %.5f, chunk: %lu, page: %lu, update: %lu\n", chunk_map_rate, ckm_info->chunk_map_cnt, ckm_info->page_map_cnt, ckm_info->update_cnt);
-        }
+        }*/
     }
     
     return lat;
@@ -2310,6 +2310,17 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         /* this is the latency taken by this read request */
         //req->expire_time = maxlat;
         //printf("Coperd,%s,rd,lba:%lu,lat:%lu\n", ssd->ssdname, req->slba, maxlat);
+        ssd->cb_info->rdelay += maxlat;
+        ssd->cb_info->rcnt++;
+        if(ssd->cb_info->rcnt % 1000000 == 0)
+        {
+            printf("avg read delay: %lu\n", ssd->cb_info->rdelay/ssd->cb_info->rcnt);
+            ssd->cb_info->rdelay = 0;
+            ssd->cb_info->rcnt = 0;
+            //struct chunk_map_info *ckm_info = ssd->mc_info->ckm_info;
+            //double chunk_map_rate = (double)(ckm_info->chunk_map_cnt)/(ckm_info->page_map_cnt + ckm_info->chunk_map_cnt);
+            //printf("taichi chunk map rate: %.5f, chunk: %lu, page: %lu, update: %lu\n", chunk_map_rate, ckm_info->chunk_map_cnt, ckm_info->page_map_cnt, ckm_info->update_cnt);
+        }
         return maxlat;
     }
 }
@@ -2381,6 +2392,22 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         curlat = ssd_advance_status(ssd, &ppa, &swr);
 #endif
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+    }
+
+    ssd->cb_info->wdelay += maxlat;
+    ssd->cb_info->wcnt++;
+    if(ssd->cb_info->wcnt % 100000 == 0)
+    {
+        printf("avg write delay: %lu\n", ssd->cb_info->wdelay/ssd->cb_info->wcnt);
+        ssd->cb_info->wdelay = 0;
+        ssd->cb_info->wcnt = 0;
+        printf("wmiss: %lu, whit: %lu, wb: %lu, cb_size: %d\n", ssd->cb_info->wbuffer_miss, ssd->cb_info->wbuffer_hit, ssd->cb_info->wb_page, ssd->cb_info->cur_size);
+#ifdef DFTL
+        struct chunk_map_info *ckm_info = ssd->mc_info->ckm_info;
+        double chunk_map_rate = (double)(ckm_info->chunk_map_cnt)/(ckm_info->page_map_cnt + ckm_info->chunk_map_cnt);
+        printf("taichi chunk map rate: %.5f, chunk: %lu, page: %lu, update: %lu\n", chunk_map_rate, ckm_info->chunk_map_cnt, ckm_info->page_map_cnt, ckm_info->update_cnt);
+        printf("mapping cache size: %d\n\n", ssd->mc_info->cur_size);
+#endif
     }
 
     return maxlat;
