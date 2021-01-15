@@ -1255,7 +1255,16 @@ void dftl_set_dirty(struct mapping_cache_info *mc_info, uint64_t lpn)
         printf("error in dftl_set_dirty()\n");
 }
 
-uint64_t write_back_trans_page(struct ssd *ssd, uint64_t tvpn, int64_t stime)
+uint64_t dftl_load_entry(struct ssd *ssd, struct ppa ppa, int64_t stime, uint64_t lat)
+{
+        struct nand_cmd srd;
+        srd.type = TRANS_IO;
+        srd.cmd = NAND_READ;
+        srd.stime = stime;
+        return ssd_advance_status_delay(ssd, &ppa, &srd, lat);
+}
+
+uint64_t write_back_trans_page(struct ssd *ssd, uint64_t tvpn, int64_t stime, int dirty_cnt)
 {
     struct ppa ppa;
     uint64_t sublat = 0;
@@ -1263,6 +1272,8 @@ uint64_t write_back_trans_page(struct ssd *ssd, uint64_t tvpn, int64_t stime)
     ppa = get_gtd_ent(ssd, tvpn);
     if(mapped_ppa(&ppa))
     {
+        if(dirty_cnt < ENTRY_PER_PAGE/2)
+            dftl_load_entry(ssd, ppa, stime, 0);
         mark_page_invalid(ssd, &ppa);
         set_rmap_ent(ssd, INVALID_LPN, &ppa);
     }
@@ -1289,15 +1300,6 @@ uint64_t write_back_trans_page(struct ssd *ssd, uint64_t tvpn, int64_t stime)
     printf("writeback trans page: %lu\n", tvpn);
 #endif
     return sublat;
-}
-
-uint64_t dftl_load_entry(struct ssd *ssd, struct ppa ppa, int64_t stime, uint64_t lat)
-{
-        struct nand_cmd srd;
-        srd.type = TRANS_IO;
-        srd.cmd = NAND_READ;
-        srd.stime = stime;
-        return ssd_advance_status_delay(ssd, &ppa, &srd, lat);
 }
 
 int dftl_test(struct ssd *ssd, uint64_t lpn, int op)
@@ -1341,7 +1343,7 @@ uint64_t dftl_translate(struct ssd* ssd, uint64_t lpn, int op, int64_t stime)
             if(victim)
             {
                 if(victim->dirty_cnt[0] > 0)
-                    sublat = write_back_trans_page(ssd, victim->tvpn, stime);
+                    sublat = write_back_trans_page(ssd, victim->tvpn, stime, 0);
                 dftl_lru_evict(ssd->mc_info, victim);
                 mc_info->cur_size -= victim->entry_cnt[0];
 
@@ -1383,10 +1385,12 @@ uint64_t taichi_add2_pagemap(struct ssd *ssd, uint64_t lpn, int64_t stime, int o
 
         if(victim)
         {
+            sublat0 = 0;
+            sublat1 = 0;
             if(victim->dirty[0] > 0)
-                sublat0 = write_back_trans_page(ssd, (victim->tvpn * 2), stime);
+                sublat0 = write_back_trans_page(ssd, (victim->tvpn * 2), stime, victim->dirty[0]);
             if(victim->dirty[1] > 0)
-                sublat1 = write_back_trans_page(ssd, (victim->tvpn * 2 + 1), stime);
+                sublat1 = write_back_trans_page(ssd, (victim->tvpn * 2 + 1), stime, victim->dirty[1]);
             dftl_lru_evict(ssd->mc_info, victim);
             mc_info->cur_size -= victim->entry_cnt[0];
             mc_info->cur_size -= victim->entry_cnt[1];
