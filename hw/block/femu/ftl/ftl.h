@@ -14,8 +14,8 @@
 #define DATA_PAGE 0
 #define TRANS_PAGE 1
 
-#define TRANS 0         //mapping base
-//#define DFTL 123    //dftl
+#define TRANS 1         //mapping base
+#define DFTL 123    //dftl
 
 enum {
     NAND_READ =  0,
