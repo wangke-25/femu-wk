@@ -48,8 +48,10 @@ struct mapping_cache_info {
     struct map_entry_node **hashmap;
 
     unsigned long dftl_rhit;
+    unsigned long dftl_rhit1;
     unsigned long dftl_rmiss;
     unsigned long dftl_whit;
+    unsigned long dftl_whit1;
     unsigned long dftl_wmiss;
 
     unsigned long r_delay;

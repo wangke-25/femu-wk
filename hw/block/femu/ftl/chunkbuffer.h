@@ -40,6 +40,9 @@ struct chunk_buffer_info {
     unsigned long wdelay;
     unsigned long rcnt;
     unsigned long wcnt;
+
+    unsigned long nand_w_cnt;
+    unsigned long nand_wt_cnt;
 };
 
 #endif
