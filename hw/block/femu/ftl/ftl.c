@@ -1320,12 +1320,20 @@ int64_t dftl_translate(struct ssd* ssd, uint64_t lpn, int op, int64_t stime)
         {
             mc_info->dftl_rmiss++;
         }
+        else if(op == WRITE)
+        {
+            mc_info->dftl_wmiss++;
+        }
     }
     else
     {
         if(op == READ)
         {
             mc_info->dftl_rhit++;
+        }
+        else if(op == WRITE)
+        {
+            mc_info->dftl_whit++;
         }
     }
     if(op == WRITE)
@@ -1363,6 +1371,8 @@ int init_chunkbuffer(struct ssd *ssd)
 
     cb_info->nand_w_cnt = 0;
     cb_info->nand_wt_cnt = 0;
+
+    cb_info->r_len = 0;
 
     cb_info->hashmap = (struct chunk_node **)malloc(sizeof(struct chunk_node *) * HASH_MAP_SIZE);
     assert(cb_info->hashmap);
@@ -1707,20 +1717,20 @@ uint64_t ssd_buffer_read(struct ssd *ssd, uint64_t lpn, int64_t stime)
         //if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) <= 50)
             //printf("read: %lu\n", lpn);
 
-        if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) % 1000000 == 0)
-        {
-            unsigned long avg_rdelay = ssd->mc_info->r_delay/(ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss);
-            printf("dftl avg rdelay: %lu\n", avg_rdelay);
-            ssd->mc_info->r_delay = 0;
-            printf("dftl rhit rate: %.5f, hit: %lu, miss: %lu\n", (double)(ssd->mc_info->dftl_rhit)/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit), 
-            ssd->mc_info->dftl_rhit, ssd->mc_info->dftl_rmiss);
-            ssd->mc_info->dftl_rhit = 0;
-            ssd->mc_info->dftl_rmiss = 0;
+        // if((ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss) % 1000000 == 0)
+        // {
+        //     unsigned long avg_rdelay = ssd->mc_info->r_delay/(ssd->mc_info->dftl_rhit + ssd->mc_info->dftl_rmiss);
+        //     printf("dftl avg rdelay: %lu\n", avg_rdelay);
+        //     ssd->mc_info->r_delay = 0;
+        //     printf("dftl rhit rate: %.5f, hit: %lu, miss: %lu\n", (double)(ssd->mc_info->dftl_rhit)/(ssd->mc_info->dftl_rmiss+ssd->mc_info->dftl_rhit), 
+        //     ssd->mc_info->dftl_rhit, ssd->mc_info->dftl_rmiss);
+        //     ssd->mc_info->dftl_rhit = 0;
+        //     ssd->mc_info->dftl_rmiss = 0;
 
-            //printf("dftl size: %d(%d)\n", ssd->mc_info->cur_size/ENTRY_PER_PAGE, ssd->mc_info->cur_size);
-            //if(ssd->mc_info->head)
-                //rintf("head: %lu, tail: %lu\n", ssd->mc_info->head->tvpn, ssd->mc_info->tail->tvpn);
-        }
+        //     //printf("dftl size: %d(%d)\n", ssd->mc_info->cur_size/ENTRY_PER_PAGE, ssd->mc_info->cur_size);
+        //     //if(ssd->mc_info->head)
+        //         //rintf("head: %lu, tail: %lu\n", ssd->mc_info->head->tvpn, ssd->mc_info->tail->tvpn);
+        // }
 
         //stime += dftl_delay;
 #endif
@@ -1815,6 +1825,24 @@ uint64_t ssd_buffer_management(struct ssd *ssd, uint64_t lpn, int64_t stime, int
         //lat = 80000;
     }
     return lat;
+}
+
+void wk_print(struct ssd *ssd)
+{
+    printf("cb_whit: %lu, cb_wmiss: %lu, nand_w: %lu, nand_wt: %lu", ssd->cb_info->wbuffer_hit, ssd->cb_info->wbuffer_miss, ssd->cb_info->nand_w_cnt, ssd->cb_info->nand_wt_cnt);
+    printf(", wa: %.5f\n", (double)(ssd->cb_info->nand_w_cnt+ssd->cb_info->nand_wt_cnt)/(ssd->cb_info->wbuffer_miss+ssd->cb_info->wbuffer_hit));
+    // printf("wmiss: %lu, whit: %lu, wb: %lu, cb_size: %d\n", ssd->cb_info->wbuffer_miss, ssd->cb_info->wbuffer_hit, ssd->cb_info->wb_page, ssd->cb_info->cur_size);
+#ifdef DFTL
+    struct mapping_cache_info *mc_info = ssd->mc_info;
+    double taichi_hit_rate = (double)(mc_info->dftl_rhit+mc_info->dftl_whit)/(mc_info->dftl_rhit+mc_info->dftl_whit+mc_info->dftl_rmiss+mc_info->dftl_wmiss);
+    printf("taichi hit rate: %.5f, hit: %lu, miss: %lu\n", taichi_hit_rate, mc_info->dftl_whit+mc_info->dftl_rhit, mc_info->dftl_wmiss+mc_info->dftl_rmiss);
+
+    mc_info->dftl_rhit = 0;
+    mc_info->dftl_rmiss = 0;
+    mc_info->dftl_whit = 0;
+    mc_info->dftl_wmiss = 0;
+    // printf("mapping cache size: %d\n\n", ssd->mc_info->cur_size);
+#endif
 }
 
 /* accept NVMe cmd as input, in order to support more command types in future */
@@ -1918,11 +1946,15 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         //printf("Coperd,%s,rd,lba:%lu,lat:%lu\n", ssd->ssdname, req->slba, maxlat);
         ssd->cb_info->r_cnt++;
         ssd->cb_info->r_delay += maxlat;
+        ssd->cb_info->r_len += req->nlb;
         if(ssd->cb_info->r_cnt % 1000000 == 0)
         {
             printf("read delay: %lu\n", ssd->cb_info->r_delay/ssd->cb_info->r_cnt);
+            printf("read avg len: %lu\n", ssd->cb_info->r_len/ssd->cb_info->r_cnt);
+            ssd->cb_info->r_len = 0;
             ssd->cb_info->r_cnt = 0;
             ssd->cb_info->r_delay = 0;
+            wk_print(ssd);
         }
         return maxlat;
     }
@@ -2000,11 +2032,12 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     ssd->cb_info->w_cnt++;
     ssd->cb_info->w_delay += maxlat;
-    if(ssd->cb_info->w_cnt % 10000 == 0)
+    if(ssd->cb_info->w_cnt % 1000000 == 0)
     {
         printf("write delay: %lu\n", ssd->cb_info->w_delay/ssd->cb_info->w_cnt);
         ssd->cb_info->w_cnt = 0;
         ssd->cb_info->w_delay = 0;
+        wk_print(ssd);
 
         //printf("cb_whit: %lu, cb_wmiss: %lu, nand_w: %lu, nand_wt: %lu", ssd->cb_info->wbuffer_hit, ssd->cb_info->wbuffer_miss, ssd->cb_info->nand_w_cnt, ssd->cb_info->nand_wt_cnt);
         //printf(", wa: %.5f\n", (double)(ssd->cb_info->nand_w_cnt+ssd->cb_info->nand_wt_cnt)/(ssd->cb_info->wbuffer_miss+ssd->cb_info->wbuffer_hit));
