@@ -824,10 +824,21 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
     if (!victim_line) {
         return NULL;
     }
-
+    
     if (!force && victim_line->ipc < ssd->sp.pgs_per_line / 8) {
         //printf("Coperd,select a victim line: ipc=%d (< 1/8)\n", victim_line->ipc);
         return NULL;
+    }
+
+    if(victim_line->type == DATA_PAGE)
+    {
+        ssd->cb_info->gc_data_line++;
+        ssd->cb_info->gc_data_cnt += victim_line->vpc;
+    }
+    else if(victim_line->type == TRANS_PAGE)
+    {
+        ssd->cb_info->gc_trans_line++;
+        ssd->cb_info->gc_trans_cnt += victim_line->vpc;
     }
 
     pqueue_pop(lm->victim_line_pq);
@@ -1372,6 +1383,11 @@ int init_chunkbuffer(struct ssd *ssd)
     cb_info->nand_w_cnt = 0;
     cb_info->nand_wt_cnt = 0;
 
+    cb_info->gc_data_line = 0;
+    cb_info->gc_data_cnt = 0;
+    cb_info->gc_trans_line = 0;
+    cb_info->gc_trans_cnt = 0;
+
     cb_info->r_len = 0;
 
     cb_info->hashmap = (struct chunk_node **)malloc(sizeof(struct chunk_node *) * HASH_MAP_SIZE);
@@ -1831,6 +1847,8 @@ void wk_print(struct ssd *ssd)
 {
     printf("cb_whit: %lu, cb_wmiss: %lu, nand_w: %lu, nand_wt: %lu", ssd->cb_info->wbuffer_hit, ssd->cb_info->wbuffer_miss, ssd->cb_info->nand_w_cnt, ssd->cb_info->nand_wt_cnt);
     printf(", wa: %.5f\n", (double)(ssd->cb_info->nand_w_cnt+ssd->cb_info->nand_wt_cnt)/(ssd->cb_info->wbuffer_miss+ssd->cb_info->wbuffer_hit));
+    printf("gc_data_line: %lu, gc_data_cnt: %lu, gc_trans_line: %lu, gc_trans_cnt: %lu, victim_line: %d\n", ssd->cb_info->gc_data_line, ssd->cb_info->gc_data_cnt, ssd->cb_info->gc_trans_line, 
+    ssd->cb_info->gc_trans_cnt, ssd->lm.victim_line_cnt);
     // printf("wmiss: %lu, whit: %lu, wb: %lu, cb_size: %d\n", ssd->cb_info->wbuffer_miss, ssd->cb_info->wbuffer_hit, ssd->cb_info->wb_page, ssd->cb_info->cur_size);
 #ifdef DFTL
     struct mapping_cache_info *mc_info = ssd->mc_info;

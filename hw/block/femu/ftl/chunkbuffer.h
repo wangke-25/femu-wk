@@ -41,6 +41,11 @@ struct chunk_buffer_info {
 
     unsigned long nand_w_cnt;
     unsigned long nand_wt_cnt;
+    
+    unsigned long gc_data_line;
+    unsigned long gc_data_cnt;
+    unsigned long gc_trans_line;
+    unsigned long gc_trans_cnt;
 
     unsigned long r_len;
 };
