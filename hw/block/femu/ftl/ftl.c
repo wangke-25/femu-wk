@@ -1965,7 +1965,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         ssd->cb_info->r_cnt++;
         ssd->cb_info->r_delay += maxlat;
         ssd->cb_info->r_len += req->nlb;
-        if(ssd->cb_info->r_cnt % 1000000 == 0)
+        if(ssd->cb_info->r_cnt % 100000 == 0)
         {
             printf("read delay: %lu\n", ssd->cb_info->r_delay/ssd->cb_info->r_cnt);
             printf("read avg len: %lu\n", ssd->cb_info->r_len/ssd->cb_info->r_cnt);
@@ -2050,7 +2050,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     ssd->cb_info->w_cnt++;
     ssd->cb_info->w_delay += maxlat;
-    if(ssd->cb_info->w_cnt % 1000000 == 0)
+    if(ssd->cb_info->w_cnt % 100000 == 0)
     {
         printf("write delay: %lu\n", ssd->cb_info->w_delay/ssd->cb_info->w_cnt);
         ssd->cb_info->w_cnt = 0;
