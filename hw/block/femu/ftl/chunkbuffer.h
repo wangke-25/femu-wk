@@ -2,7 +2,7 @@
 #define __CHUNK_BUFFER_H
 
 #define PAGES_PER_CHUNK 32
-#define MAX_CHUNK_BUFFER_SIZE 256           //192
+#define MAX_CHUNK_BUFFER_SIZE 64
 #define HASH_MAP_SIZE (MAX_CHUNK_BUFFER_SIZE * 2)
 #define NODE_ADD_SIZE 1
 

@@ -4,8 +4,8 @@
 #define M 64
 #define N 32
 #define ENTRY_PER_PAGE 2048             // M*N
-#define MAX_MAPPING_CAHCHE_SIZE (60 * ENTRY_PER_PAGE)   //28
-#define DFTL_HASH_MAP_SIZE (128 * ENTRY_PER_PAGE)         //1024*2
+#define MAX_MAPPING_CAHCHE_SIZE (92 * ENTRY_PER_PAGE)   //28
+#define DFTL_HASH_MAP_SIZE (256 * ENTRY_PER_PAGE)         //1024*2
 #define DFTL_NODE_ADD_SIZE 1
 
 #define WRITE 0

@@ -1967,6 +1967,9 @@ int lru_add_new_node(struct chunk_buffer_info *cb_info, uint64_t lpn, int res)
     uint64_t lcn = lpn / PAGES_PER_CHUNK;
     uint64_t offset = lpn % PAGES_PER_CHUNK;
 
+    if(cb_info->head == NULL)
+        res = -1;
+
     if(res == 0)
     {
         struct chunk_node *tmp = cb_info->head;
@@ -2457,7 +2460,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     ssd->cb_info->wdelay += maxlat;
     ssd->cb_info->wcnt++;
-    if(ssd->cb_info->wcnt % 1000000 == 0)
+    if(ssd->cb_info->wcnt % 100000 == 0)
     {
         printf("avg write delay: %lu\n", ssd->cb_info->wdelay/ssd->cb_info->wcnt);
         printf("read cnt: %lu\n", ssd->cb_info->rcnt);
