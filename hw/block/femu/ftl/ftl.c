@@ -2375,7 +2375,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         //printf("Coperd,%s,rd,lba:%lu,lat:%lu\n", ssd->ssdname, req->slba, maxlat);
         ssd->cb_info->rdelay += maxlat;
         ssd->cb_info->rcnt++;
-        if(ssd->cb_info->rcnt % 1000000 == 0)
+        if(ssd->cb_info->rcnt % 100000 == 0)
         {
             printf("avg read delay: %lu\n", ssd->cb_info->rdelay/ssd->cb_info->rcnt);
             ssd->cb_info->rdelay = 0;
