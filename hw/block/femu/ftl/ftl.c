@@ -991,9 +991,9 @@ static void *ftl_thread(void *arg)
             }
 
             /* clean one line if needed (in the background) */
-            if (should_gc(ssd)) {
-                do_gc(ssd, false);
-            }
+            // if (should_gc(ssd)) {
+            //     do_gc(ssd, false);
+            // }
         }
     }
 }
@@ -1847,8 +1847,8 @@ void wk_print(struct ssd *ssd)
 {
     printf("cb_whit: %lu, cb_wmiss: %lu, nand_w: %lu, nand_wt: %lu", ssd->cb_info->wbuffer_hit, ssd->cb_info->wbuffer_miss, ssd->cb_info->nand_w_cnt, ssd->cb_info->nand_wt_cnt);
     printf(", wa: %.5f\n", (double)(ssd->cb_info->nand_w_cnt+ssd->cb_info->nand_wt_cnt)/(ssd->cb_info->wbuffer_miss+ssd->cb_info->wbuffer_hit));
-    printf("gc_data_line: %lu, gc_data_cnt: %lu, gc_trans_line: %lu, gc_trans_cnt: %lu, victim_line: %d\n", ssd->cb_info->gc_data_line, ssd->cb_info->gc_data_cnt, ssd->cb_info->gc_trans_line, 
-    ssd->cb_info->gc_trans_cnt, ssd->lm.victim_line_cnt);
+    printf("gc_data_line: %lu, gc_data_cnt: %lu, gc_trans_line: %lu, gc_trans_cnt: %lu, victim_line: %d, free_line:%d, full_line: %d\n", ssd->cb_info->gc_data_line, ssd->cb_info->gc_data_cnt, ssd->cb_info->gc_trans_line, 
+    ssd->cb_info->gc_trans_cnt, ssd->lm.victim_line_cnt, ssd->lm.free_line_cnt, ssd->lm.full_line_cnt);
     // printf("wmiss: %lu, whit: %lu, wb: %lu, cb_size: %d\n", ssd->cb_info->wbuffer_miss, ssd->cb_info->wbuffer_hit, ssd->cb_info->wb_page, ssd->cb_info->cur_size);
 #ifdef DFTL
     struct mapping_cache_info *mc_info = ssd->mc_info;
