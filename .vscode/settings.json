@@ -29,6 +29,7 @@
         "system_error": "c",
         "typeinfo": "c",
         "memory_resource": "c",
-        "initializer_list": "c"
+        "initializer_list": "c",
+        "*.inc": "cpp"
     }
 }

@@ -5,7 +5,7 @@
 #include "qemu/thread.h"
 
 #include "chunkbuffer.h"
-#include "dftl.h"
+#include "fast.h"
 
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
@@ -14,8 +14,8 @@
 #define DATA_PAGE 0
 #define TRANS_PAGE 1
 
-#define TRANS 1         //mapping base
-#define DFTL 123    //dftl
+#define TRANS 0         //mapping base
+//#define DFTL 123    //dftl
 
 enum {
     NAND_READ =  0,
@@ -31,6 +31,7 @@ enum {
     USER_IO = 0,
     GC_IO = 1,
     TRANS_IO = 2,
+    MERGE_IO = 3,
 };
 
 enum {

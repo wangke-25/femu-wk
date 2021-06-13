@@ -178,12 +178,15 @@ static struct line *get_next_free_line(struct ssd *ssd, int type)
     return curline;
 }
 
+
+void full_merge(struct ssd *ssd, int id);
 static void ssd_advance_write_pointer(struct ssd *ssd, int type)
 {
     struct ssdparams *spp = &ssd->sp;
     //struct write_pointer *wpp = &ssd->wp;
     struct write_pointer *wpp;
     struct line_mgmt *lm = &ssd->lm;
+    struct log_mgmt *logm = ssd->mc_info->logm;
     if(type == DATA_PAGE)
     {
         wpp = &ssd->wp;
@@ -210,6 +213,7 @@ static void ssd_advance_write_pointer(struct ssd *ssd, int type)
             if (wpp->pg == spp->pgs_per_blk) {
                 wpp->pg = 0;
                 /* move current line to {victim,full} line list */
+#if 0
                 if (wpp->curline->vpc == spp->pgs_per_line) {
                     /* all pgs are still valid, move to full line list */
                     assert(wpp->curline->ipc == 0);
@@ -224,6 +228,13 @@ static void ssd_advance_write_pointer(struct ssd *ssd, int type)
                     //QTAILQ_INSERT_TAIL(&lm->victim_line_list, wpp->curline, entry);
                     lm->victim_line_cnt++;
                 }
+#endif
+                printf("\nline %d is full\n", wpp->curline->id);
+                logm->log_line_list[logm->cur] = wpp->curline->id;
+                logm->cur = (logm->cur + 1) % MAX_LOG_LINE;
+                logm->log_line_cnt++;
+
+
                 /* current line is used up, pick another empty line */
                 check_addr(wpp->blk, spp->blks_per_pl);
                 /* TODO: how should we choose the next block for writes */
@@ -240,6 +251,23 @@ static void ssd_advance_write_pointer(struct ssd *ssd, int type)
                 assert(wpp->ch == 0);
                 /* TODO: assume # of pl_per_lun is 1, fix later */
                 assert(wpp->pl == 0);
+#if 1
+                printf("log line cnt %d\n", logm->log_line_cnt);
+                for(int i = 0; i < 24; i++)
+                    printf("%d: %d, ", i, logm->log_line_list[i]);
+                printf("\n");
+                if(logm->log_line_cnt == MAX_LOG_LINE)
+                {
+                    int head = logm->cur;
+                    printf("full_merge line %d!\n", logm->log_line_list[head]);
+                    full_merge(ssd, logm->log_line_list[head]);
+                    logm->log_line_cnt--;
+                    logm->log_line_list[head] = -1;
+                }
+                for(int i = 0; i < 24; i++)
+                    printf("%d: %d, ", i, logm->log_line_list[i]);
+                printf("\n");
+#endif
             }
         }
     }
@@ -282,12 +310,12 @@ static void ssd_init_params(struct ssdparams *spp)
 {
     spp->secsz = 512;
     spp->secs_per_pg = 8;
-    spp->pgs_per_blk = 256;
+    spp->pgs_per_blk = 1024;
     //spp->blks_per_pl = 256; /* 16GB */
-    spp->blks_per_pl = 640; /* 40GB */
+    spp->blks_per_pl = 1280; /* 80GB */
     spp->pls_per_lun = 1;
     spp->luns_per_ch = 8;
-    spp->nchs = 8;
+    spp->nchs = 2;
 
     spp->pg_rd_lat = NAND_READ_LATENCY;
     spp->pg_wr_lat = NAND_PROG_LATENCY;
@@ -455,6 +483,8 @@ void ssd_init(FemuCtrl *n)
     /* init dftl */
     init_dftl(ssd);
 #endif
+
+    init_fast(ssd);
 
     /* initialize rmap */
     ssd_init_rmap(ssd);
@@ -651,6 +681,7 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
     line->ipc++;
     assert(line->vpc > 0 && line->vpc <= spp->pgs_per_line);
     line->vpc--;
+#if 0
     if (was_full_line) {
         /* move line: "full" -> "victim" */
         QTAILQ_REMOVE(&lm->full_line_list, line, entry);
@@ -659,6 +690,7 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
         //QTAILQ_INSERT_TAIL(&lm->victim_line_list, line, entry);
         lm->victim_line_cnt++;
     }
+#endif
 }
 
 /* update SSD status about one page from PG_FREE -> PG_VALID */
@@ -944,6 +976,201 @@ static int do_gc(struct ssd *ssd, bool force)
     return 0;
 }
 
+void merge_read_page(struct ssd *ssd, struct ppa *ppa)
+{
+    struct nand_cmd mgr;
+    mgr.type = MERGE_IO;
+    mgr.cmd = NAND_READ;
+    mgr.stime = 0;
+    ssd_advance_status(ssd, ppa, &mgr);
+}
+
+void merge_write_page(struct ssd *ssd, struct ppa *old_ppa, struct line *new_line, uint64_t lpn_tmp)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct ppa new_ppa;
+    struct nand_lun *new_lun;
+    uint64_t lpn = get_rmap_ent(ssd, old_ppa);
+    uint64_t offset = 0;
+    struct nand_cmd mgw;
+
+    assert(lpn == lpn_tmp);     //just for check
+    
+    offset = lpn % spp->pgs_per_line;
+
+    new_ppa.g.ch = offset % spp->nchs;
+    new_ppa.g.lun = (offset / spp->nchs) % spp->luns_per_ch;
+    new_ppa.g.pl = 0;
+    new_ppa.g.blk = new_line->id;
+    new_ppa.g.pg = offset / (spp->nchs * spp->luns_per_ch);
+    //printf("ch: %d, lun: %d, pl: %d, blk: %d, pg: %d\n", new_ppa.g.ch, new_ppa.g.lun, new_ppa.g.pl, new_ppa.g.blk, new_ppa.g.pg);
+
+    set_maptbl_ent(ssd, lpn, &new_ppa);
+    set_rmap_ent(ssd, lpn, &new_ppa);
+    mark_page_invalid(ssd, old_ppa);
+    mark_page_valid(ssd, &new_ppa);
+
+    mgw.type = MERGE_IO;
+    mgw.cmd = NAND_WRITE;
+    mgw.stime = 0;
+    ssd_advance_status(ssd, &new_ppa, &mgw);
+
+    //new_lun = get_lun(ssd, &new_ppa);
+}
+
+void erase_old_line(struct ssd *ssd, int line_id)
+{
+    struct line_mgmt *lm = &ssd->lm;
+    struct line *line = &lm->lines[line_id];
+    struct ssdparams *spp = &ssd->sp;
+    struct ppa ppa;
+    struct nand_page *page = NULL;
+    struct nand_block *blk;
+    int ch, lun, i;
+
+    for(ch = 0; ch < spp->nchs; ch++)
+    {
+        ppa.g.ch = ch;
+        for(lun = 0; lun < spp->luns_per_ch; lun++)
+        {
+            ppa.g.lun = lun;
+            ppa.g.pl = 0;
+            ppa.g.blk = line_id;
+            blk = get_blk(ssd, &ppa);
+            
+            for(i = 0; i < spp->pgs_per_blk; i++)
+            {
+                page = &blk->pg[i];
+                page->status = PG_FREE;
+            }
+
+            blk->ipc = 0;
+            blk->vpc = 0;
+            blk->erase_cnt++;
+
+            struct nand_cmd mge;
+            mge.type = MERGE_IO;
+            mge.cmd = NAND_ERASE;
+            mge.stime = 0;
+            ssd_advance_status(ssd, &ppa, &mge);
+        }
+    }
+
+    mark_line_free(ssd, &ppa);
+}
+
+void merge_line(struct ssd *ssd, struct ppa *merge_ppa)
+{
+
+    struct ssdparams *spp = &ssd->sp;
+    struct ppa ppa;
+    int lline_id, pline_id, i;
+    uint64_t lpn = get_rmap_ent(ssd, merge_ppa);
+    uint64_t start_lpn;
+    struct line *new_line = get_next_free_line(ssd, DATA_PAGE);
+    
+    assert(valid_lpn(ssd, lpn));
+    lline_id = lpn / spp->pgs_per_line;
+    start_lpn = lline_id * spp->pgs_per_line;
+
+    printf("lpn: %d, merge logic line %d\n", lpn, lline_id);
+    for(i = 0; i < spp->pgs_per_line; i++)
+    {
+        ppa = get_maptbl_ent(ssd, start_lpn+i);
+        if(mapped_ppa(&ppa))
+        {
+            //printf("migrate page %d, line: %d\n", start_lpn+i, ppa.g.blk);
+            merge_read_page(ssd, &ppa);
+            merge_write_page(ssd, &ppa, new_line, start_lpn+i);
+            //printf("migrate page %d\n\n", start_lpn+i);
+        }
+    }
+    printf("end migration\n");
+
+    pline_id = ssd->mc_info->BMT[lline_id];
+    if(pline_id != -1)
+    {
+        erase_old_line(ssd, pline_id);
+    }
+    ssd->mc_info->BMT[lline_id] = new_line->id;
+}
+
+void merge_write_log_page(struct ssd *ssd, struct ppa *old_ppa)
+{
+    struct ppa new_ppa;
+    struct nand_cmd mgw;
+    uint64_t lpn = get_rmap_ent(ssd, old_ppa);
+    
+    /*read page*/
+    merge_read_page(ssd, old_ppa);
+
+    /*write page*/
+    assert(valid_lpn(ssd, lpn));
+    new_ppa = get_new_page(ssd, DATA_PAGE);
+    set_maptbl_ent(ssd, lpn, &new_ppa);
+    set_rmap_ent(ssd, lpn, &new_ppa);
+    mark_page_valid(ssd, &new_ppa);
+
+    ssd_advance_write_pointer(ssd, DATA_PAGE);
+
+    mgw.type = MERGE_IO;
+    mgw.cmd = NAND_WRITE;
+    mgw.stime = 0;
+    ssd_advance_status(ssd, &new_ppa, &mgw);
+}
+
+void full_merge(struct ssd *ssd, int id)
+{
+    struct line *victim_line = NULL;
+    struct line_mgmt *lm = &ssd->lm;
+    struct ssdparams *spp = &ssd->sp;
+    struct nand_page *pg_iter = NULL;
+    struct ppa ppa;
+    int ch, lun, pg;
+    int merge_line_cnt = 0;
+    
+    victim_line = &lm->lines[id];
+    printf("victim_line: %d, vild page: %d\n", id, victim_line->vpc);
+    
+    if(!victim_line)
+    {
+        printf("full merge get victim line error!\n");
+        return -1;
+    }
+
+    for(pg = 0; pg < spp->pgs_per_blk; pg++)
+    {
+        for(lun = 0; lun < spp->luns_per_ch; lun++)
+        {
+            for(ch = 0; ch < spp->nchs; ch++)
+            {
+                ppa.g.ch = ch;
+                ppa.g.lun = lun;
+                ppa.g.pl = 0;
+                ppa.g.blk = id;
+                ppa.g.pg = pg;
+
+                pg_iter = get_pg(ssd, &ppa);
+                assert(pg_iter->status != PG_FREE);
+                if(pg_iter->status == PG_VALID)
+                {
+                    if(merge_line_cnt < 10)
+                    {
+                        merge_line(ssd, &ppa);
+                        merge_line_cnt++;
+                    }
+                    else
+                        merge_write_log_page(ssd, &ppa);
+                    //merge_write_log_page(ssd, &ppa);
+                }
+                
+            }
+        }
+    }
+
+    erase_old_line(ssd, id);
+}
+
 static void *ftl_thread(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
@@ -996,6 +1223,31 @@ static void *ftl_thread(void *arg)
             // }
         }
     }
+}
+
+int init_fast(struct ssd *ssd)
+{
+    int i;
+    struct ssdparams *spp = &ssd->sp;
+
+    struct mapping_cache_info *mc_info = (struct mapping_cache_info *)malloc(sizeof(struct mapping_cache_info));
+    assert(mc_info);
+
+    mc_info->BMT = g_malloc0(sizeof(int) * spp->tt_lines);
+    for(i = 0; i < spp->tt_lines; i++)
+        mc_info->BMT[i] = -1;
+    mc_info->mapping_status = g_malloc0(sizeof(int) * spp->tt_pgs);
+    for(i = 0; i < spp->tt_pgs; i++)
+        mc_info->mapping_status[i] = -1;
+    
+    mc_info->logm = (struct log_mgmt *)malloc(sizeof(struct log_mgmt));
+    mc_info->logm->log_line_cnt = 0;
+    for(i = 0; i < MAX_LOG_LINE; i++)
+        mc_info->logm->log_line_list[i] = -1;
+    mc_info->logm->cur = 0;
+
+    ssd->mc_info = mc_info;
+    return 0;
 }
 
 #ifdef DFTL
@@ -1651,6 +1903,13 @@ uint64_t write_back_page(struct ssd *ssd, uint64_t lpn, int64_t stime)
     /* update rmap */
     set_rmap_ent(ssd, lpn, &ppa);
 
+#if 0
+    if(lpn < 0 || lpn > ssd->sp.tt_pgs)
+        printf("lpn:%ld, %ld\n", lpn, ssd->sp.tt_pgs);
+    else
+        ssd->mc_info->mapping_status[lpn] = 1;
+#endif
+
     mark_page_valid(ssd, &ppa);
 
     /* need to advance the write pointer here */
@@ -1999,6 +2258,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     //printf("Coperd,%s,end_lpn=%"PRIu64" (%d),len=%d\n", __func__, end_lpn, spp->tt_pgs, len);
     //printf("write: %lu, len: %d\n", req->slba, req->nlb);
 
+#if 0
     while (should_gc_high(ssd)) {
         /* perform GC here until !should_gc(ssd) */
         r = do_gc(ssd, true);
@@ -2006,6 +2266,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
         //break;
     }
+#endif
 
     /* on cache eviction, write to NAND page */
 
